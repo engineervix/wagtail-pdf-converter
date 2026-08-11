@@ -328,7 +328,7 @@ class GeminiBackend(AIPDFBackend):
         """
         from pydantic import ValidationError
 
-        from ...elements import DocumentElements, ParagraphElement
+        from ...elements import ParagraphElement, parse_elements
 
         text = raw_text.strip()
         # Strip a markdown code fence if the model wrapped the JSON in one.
@@ -347,17 +347,22 @@ class GeminiBackend(AIPDFBackend):
             logger.warning("Element conversion returned non-JSON output; using fallback paragraph.")
             return _fallback()
 
+        raw_elements = data.get("elements") if isinstance(data, dict) else None
+        if raw_elements is None:
+            logger.warning("Element output missing 'elements' key; using fallback paragraph.")
+            return _fallback()
+
         try:
-            document = DocumentElements.model_validate(data)
+            elements = parse_elements(raw_elements)
         except ValidationError:
             logger.warning("Element output failed schema validation; using fallback paragraph.")
             return _fallback()
 
-        if not document.elements:
+        if not elements:
             logger.warning("Element output was empty; using fallback paragraph.")
             return _fallback()
 
-        return list(document.elements)
+        return elements
 
     def convert_pdf_to_elements(
         self, pdf_bytes: bytes, image_report: list[dict[str, Any]] | None = None

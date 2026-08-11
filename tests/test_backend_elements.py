@@ -51,3 +51,18 @@ class TestParseElementsResponse:
         elements = backend.parse_elements_response(json.dumps({"elements": []}))
         assert len(elements) == 1
         assert isinstance(elements[0], ParagraphElement)
+
+    def test_missing_elements_key_returns_fallback(self):
+        """Valid JSON, but not shaped like {"elements": [...]}."""
+        backend = self._backend()
+        elements = backend.parse_elements_response(json.dumps({"foo": "bar"}))
+        assert len(elements) == 1
+        assert isinstance(elements[0], ParagraphElement)
+
+    def test_bare_list_json_returns_fallback(self):
+        """A bare JSON list (not wrapped in {"elements": ...}) isn't the expected shape."""
+        backend = self._backend()
+        payload = json.dumps([{"type": "paragraph", "text": "x"}])
+        elements = backend.parse_elements_response(payload)
+        assert len(elements) == 1
+        assert isinstance(elements[0], ParagraphElement)
