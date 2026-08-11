@@ -9,7 +9,10 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("testapp", "0002_add_documentconversion"),
-        ("wagtailcore", "0097_baselogentry_uuid_action_timestamp_indexes"),
+        # Depend on a wagtailcore migration present in all supported Wagtail
+        # versions (6.3+), not the latest — this project is tested across a
+        # version matrix, and referencing a newer migration breaks older ones.
+        ("wagtailcore", "0094_alter_page_locale"),
     ]
 
     operations = [
