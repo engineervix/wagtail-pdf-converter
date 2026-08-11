@@ -20,6 +20,7 @@ from wagtail.documents.views.documents import (
 from wagtail.documents.views.documents import IndexView as WagtailDocsIndexView
 from wagtail.images.views.images import IndexView as WagtailImagesIndexView
 
+from wagtail_pdf_converter.conf import page_creation_configured
 from wagtail_pdf_converter.conf import settings as pdf_settings
 from wagtail_pdf_converter.constants import ConversionStatusDisplay
 from wagtail_pdf_converter.enums import ConversionStatus
@@ -106,11 +107,7 @@ class ConversionStatusColumn(Column):
         context["started_at"] = value["started_at"]
         context["view_url"] = reverse("wagtail_pdf_converter_document_html", args=(value["id"],))
         context["retry_url"] = reverse("wagtail_pdf_converter:retry_conversion", args=(value["id"],))
-        context["show_create_page"] = bool(
-            pdf_settings.ENABLE_PAGE_CREATION
-            and pdf_settings.PAGE_CREATION_MODEL
-            and pdf_settings.PAGE_CREATION_PARENT_ID
-        )
+        context["show_create_page"] = page_creation_configured()
         context["create_page_url"] = reverse("wagtail_pdf_converter:create_page", args=(value["id"],))
         return context
 

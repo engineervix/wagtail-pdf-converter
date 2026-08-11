@@ -139,6 +139,11 @@ class PDFConverterSettings:
 settings = PDFConverterSettings(None, DEFAULTS, IMPORT_STRINGS)
 
 
+def page_creation_configured() -> bool:
+    """Whether page creation is enabled and has a model and parent page configured."""
+    return bool(settings.ENABLE_PAGE_CREATION and settings.PAGE_CREATION_MODEL and settings.PAGE_CREATION_PARENT_ID)
+
+
 def reload_settings(*args, **kwargs):
     setting = kwargs["setting"]
     if setting == "WAGTAIL_PDF_CONVERTER":
