@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any
 import django_filters
 
 from django.contrib import messages
+from django.core.exceptions import PermissionDenied
 from django.db.models import Avg, FloatField
 from django.db.models.functions import Cast
 from django.shortcuts import get_object_or_404, redirect, render
@@ -261,6 +262,12 @@ def create_page_from_document(request: "HttpRequest", document_id: int) -> Any:
     except Page.DoesNotExist:
         messages.error(request, _("Configured parent page (id=%(id)s) does not exist.") % {"id": parent_id})
         return redirect("wagtaildocs:index")
+
+    # Admin access alone isn't enough: the user also needs page-tree
+    # permission to add a page under the configured parent, same as
+    # Wagtail's own page-create view (wagtail.admin.views.pages.create).
+    if not parent.permissions_for_user(request.user).can_add_subpage():
+        raise PermissionDenied
 
     if request.method == "GET":
         return render(

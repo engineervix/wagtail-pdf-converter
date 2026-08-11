@@ -2,13 +2,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group, Permission
 from django.core.files.base import ContentFile
 from django.test import override_settings
 from django.urls import reverse
+from wagtail.models import GroupPagePermission, Page
 
 from wagtail_pdf_converter.elements import ParagraphElement
 
 from .testproject.testapp.models import CustomDocument, PDFPage
+
+
+User = get_user_model()
 
 
 @pytest.mark.django_db
@@ -18,6 +24,17 @@ class TestCreatePageFromDocumentView:
             title="Report",
             file=ContentFile(b"%PDF-1.4 fake", name="report.pdf"),
         )
+
+    def _make_editor(self, username, can_add_subpage_on=None):
+        """A staff user with Wagtail admin access but no page permissions,
+        optionally granted 'add' on a specific page (e.g. the configured parent)."""
+        user = User.objects.create_user(username=username, password="password", is_staff=True)  # noqa: S106
+        group = Group.objects.create(name=f"{username}-group")
+        group.permissions.add(Permission.objects.get(content_type__app_label="wagtailadmin", codename="access_admin"))
+        user.groups.add(group)
+        if can_add_subpage_on is not None:
+            GroupPagePermission.objects.create(group=group, page=can_add_subpage_on, permission_type="add")
+        return user
 
     def _settings(self, **overrides):
         base = {
@@ -71,3 +88,59 @@ class TestCreatePageFromDocumentView:
         url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
         client_superuser.get(url, follow=True)
         assert PDFPage.objects.count() == 0
+
+    def test_denied_without_add_subpage_permission(self, client, monkeypatch):
+        """Admin access alone must not be enough; the user needs page-tree
+        add permission on the configured parent, same as Wagtail's own
+        page-create view enforces. The converter is mocked so a real AI/network
+        failure can't be mistaken for the permission check doing its job."""
+        document = self._make_document()
+        user = self._make_editor("no-page-perms")
+        client.force_login(user)
+
+        elements = [ParagraphElement(type="paragraph", text="Hello world.")]
+        mock_converter = MagicMock()
+        mock_converter.convert_pdf_to_elements.return_value = (elements, {})
+        monkeypatch.setattr(
+            "wagtail_pdf_converter.admin_views._build_converter",
+            lambda: mock_converter,
+        )
+
+        with self._settings():
+            url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
+            client.post(url, follow=True)
+
+        assert PDFPage.objects.count() == 0
+        mock_converter.convert_pdf_to_elements.assert_not_called()
+
+    def test_get_denied_without_add_subpage_permission(self, client):
+        document = self._make_document()
+        user = self._make_editor("no-page-perms-get")
+        client.force_login(user)
+
+        with self._settings():
+            url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
+            response = client.get(url)
+
+        assert PDFPage.objects.count() == 0
+        assert b"Create page from PDF" not in response.content
+
+    def test_allowed_with_add_subpage_permission(self, client, monkeypatch):
+        document = self._make_document()
+        parent = Page.objects.get(pk=2)
+        user = self._make_editor("has-page-perms", can_add_subpage_on=parent)
+        client.force_login(user)
+
+        elements = [ParagraphElement(type="paragraph", text="Hello world.")]
+        mock_converter = MagicMock()
+        mock_converter.convert_pdf_to_elements.return_value = (elements, {})
+        monkeypatch.setattr(
+            "wagtail_pdf_converter.admin_views._build_converter",
+            lambda: mock_converter,
+        )
+
+        with self._settings():
+            url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
+            client.post(url, follow=True)
+
+        assert PDFPage.objects.count() == 1
