@@ -19,6 +19,7 @@ from wagtail.documents.views.documents import (
 )
 from wagtail.documents.views.documents import IndexView as WagtailDocsIndexView
 from wagtail.images.views.images import IndexView as WagtailImagesIndexView
+from wagtail.models import Page
 
 from wagtail_pdf_converter.conf import page_creation_configured
 from wagtail_pdf_converter.conf import settings as pdf_settings
@@ -255,8 +256,6 @@ def create_page_from_document(request: "HttpRequest", document_id: int) -> Any:
             _("PDF page creation requires PAGE_CREATION_MODEL and PAGE_CREATION_PARENT_ID to be configured."),
         )
         return redirect("wagtaildocs:index")
-
-    from wagtail.models import Page
 
     try:
         parent = Page.objects.get(pk=parent_id)
