@@ -239,6 +239,10 @@ def create_page_from_document(request: "HttpRequest", document_id: int) -> Any:
     """
     document = get_object_or_404(Document, id=document_id)
 
+    if not getattr(document, "is_pdf", False):
+        messages.error(request, _("Page creation is only available for PDF documents."))
+        return redirect("wagtaildocs:index")
+
     if not pdf_settings.ENABLE_PAGE_CREATION:
         messages.error(request, _("PDF-to-page creation is not enabled."))
         return redirect("wagtaildocs:index")

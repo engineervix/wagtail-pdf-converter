@@ -144,3 +144,40 @@ class TestCreatePageFromDocumentView:
             client.post(url, follow=True)
 
         assert PDFPage.objects.count() == 1
+
+    def test_non_pdf_document_is_rejected(self, client_superuser, monkeypatch):
+        """A non-PDF document must be refused outright, not handed to the AI
+        pipeline (which would otherwise happily fabricate a page from it if
+        the converter tolerates non-PDF bytes, or crash unclearly if not)."""
+        document = CustomDocument.objects.create(
+            title="Not a PDF",
+            file=ContentFile(b"just some text", name="notes.txt"),
+        )
+        mock_converter = MagicMock()
+        mock_converter.convert_pdf_to_elements.return_value = (
+            [ParagraphElement(type="paragraph", text="fabricated")],
+            {},
+        )
+        monkeypatch.setattr(
+            "wagtail_pdf_converter.admin_views._build_converter",
+            lambda: mock_converter,
+        )
+
+        with self._settings():
+            url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
+            client_superuser.post(url, follow=True)
+
+        assert PDFPage.objects.count() == 0
+        mock_converter.convert_pdf_to_elements.assert_not_called()
+
+    def test_get_non_pdf_document_shows_error_not_confirm(self, client_superuser):
+        document = CustomDocument.objects.create(
+            title="Not a PDF",
+            file=ContentFile(b"just some text", name="notes.txt"),
+        )
+        with self._settings():
+            url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
+            response = client_superuser.get(url, follow=True)
+
+        assert PDFPage.objects.count() == 0
+        assert b"Create page from PDF" not in response.content
