@@ -80,6 +80,9 @@ def create_page_from_elements(
 
     page.body = safe_tuples
 
+    # AI-derived content needs human review before it's public: create as a
+    # draft, not live, so the editor confirms before publishing.
+    page.live = False
     parent.add_child(instance=page)
     page.save_revision(user=user)
     return page

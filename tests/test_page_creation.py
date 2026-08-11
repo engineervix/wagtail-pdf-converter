@@ -58,3 +58,16 @@ class TestCreatePageFromElements:
         )
         assert page.slug
         assert root.get_children().filter(pk=page.pk).exists()
+
+    def test_new_page_is_created_as_draft(self):
+        """AI-derived content must be reviewed before it goes live, not published on creation."""
+        root = Page.objects.get(id=2)
+        page = create_page_from_elements(
+            title="Draft Check",
+            elements=[ParagraphElement(type="paragraph", text="x")],
+            parent=root,
+            page_model=PDFPage,
+        )
+        assert page.live is False
+        assert page.has_unpublished_changes is True
+        assert Page.objects.get(pk=page.pk).live is False
