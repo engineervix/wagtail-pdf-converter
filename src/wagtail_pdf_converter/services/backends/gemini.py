@@ -25,6 +25,11 @@ from .base import AIPDFBackend
 
 logger = logging.getLogger(__name__)
 
+# Cap on how much of a malformed/unparseable response the fallback paragraph
+# carries verbatim. The full response is still in the warning log; this just
+# keeps a parse failure from dumping an unbounded blob into a page.
+FALLBACK_TEXT_MAX_CHARS = 2000
+
 
 class GeminiBackend(AIPDFBackend):
     """
@@ -339,7 +344,10 @@ class GeminiBackend(AIPDFBackend):
             text = "\n".join(lines).strip()
 
         def _fallback() -> "list[Element]":
-            return [ParagraphElement(type="paragraph", text=raw_text.strip() or "[Unparsed PDF content]")]
+            fallback_text = raw_text.strip() or "[Unparsed PDF content]"
+            if len(fallback_text) > FALLBACK_TEXT_MAX_CHARS:
+                fallback_text = fallback_text[:FALLBACK_TEXT_MAX_CHARS] + "… [truncated]"
+            return [ParagraphElement(type="paragraph", text=fallback_text)]
 
         try:
             data = json.loads(text)

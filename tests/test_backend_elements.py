@@ -38,6 +38,15 @@ class TestParseElementsResponse:
         assert isinstance(elements[0], ParagraphElement)
         assert "this is not json" in elements[0].text
 
+    def test_long_invalid_response_is_truncated_in_fallback(self):
+        """A malformed response shouldn't dump an unbounded blob into a page."""
+        backend = self._backend()
+        garbage = "not json " * 1000  # ~9000 chars
+        elements = backend.parse_elements_response(garbage)
+        assert len(elements) == 1
+        assert len(elements[0].text) < len(garbage)
+        assert elements[0].text.endswith("[truncated]")
+
     def test_schema_violation_returns_fallback_paragraph(self):
         backend = self._backend()
         # heading level out of range -> validation error -> fallback
