@@ -14,6 +14,7 @@ from wagtail_pdf_converter.utils import add_image_to_wagtail_collection
 
 from .testproject.testapp.models import PDFPage
 
+
 Image = get_image_model()
 
 

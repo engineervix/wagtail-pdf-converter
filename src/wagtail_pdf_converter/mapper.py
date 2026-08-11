@@ -9,13 +9,15 @@ recognise, so every element must resolve to a registered block name.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from .elements import (
     CodeElement,
     Element,
+    HeadingElement,
     ImageElement,
     ListElement,
+    ParagraphElement,
     QuoteElement,
     TableElement,
 )
@@ -27,33 +29,38 @@ FALLBACK_BLOCK = "paragraph"
 
 
 def _heading_converter(element: Element) -> tuple[str, Any]:
-    return ("heading", element.text)
+    return ("heading", cast("HeadingElement", element).text)
 
 
 def _paragraph_converter(element: Element) -> tuple[str, Any]:
-    return ("paragraph", element.text)
+    return ("paragraph", cast("ParagraphElement", element).text)
 
 
-def _image_converter(element: ImageElement) -> tuple[str, Any]:
+def _image_converter(element: Element) -> tuple[str, Any]:
     # Pure: pass the content hash + alt through so the loader can resolve the
     # already-stored Wagtail Image by hash (no DB access here).
-    return ("image", {"image_hash": element.image_hash, "alt": element.alt})
+    el = cast(ImageElement, element)
+    return ("image", {"image_hash": el.image_hash, "alt": el.alt})
 
 
-def _quote_converter(element: QuoteElement) -> tuple[str, Any]:
-    return ("quote", {"text": element.text, "attribution": element.attribution})
+def _quote_converter(element: Element) -> tuple[str, Any]:
+    el = cast(QuoteElement, element)
+    return ("quote", {"text": el.text, "attribution": el.attribution})
 
 
-def _code_converter(element: CodeElement) -> tuple[str, Any]:
-    return ("code", {"code": element.code, "language": element.language})
+def _code_converter(element: Element) -> tuple[str, Any]:
+    el = cast(CodeElement, element)
+    return ("code", {"code": el.code, "language": el.language})
 
 
-def _table_converter(element: TableElement) -> tuple[str, Any]:
-    return ("table", {"header": element.header, "rows": element.rows})
+def _table_converter(element: Element) -> tuple[str, Any]:
+    el = cast(TableElement, element)
+    return ("table", {"header": el.header, "rows": el.rows})
 
 
-def _list_converter(element: ListElement) -> tuple[str, Any]:
-    return ("list", {"ordered": element.ordered, "items": element.items})
+def _list_converter(element: Element) -> tuple[str, Any]:
+    el = cast(ListElement, element)
+    return ("list", {"ordered": el.ordered, "items": el.items})
 
 
 class MapperRegistry:

@@ -512,9 +512,7 @@ class HybridPDFConverter:
             chunks = self.split_pdf_into_chunks(pdf_bytes, pages_per_chunk, overlap_pages=1)
             for i, chunk_bytes in enumerate(chunks, 1):
                 try:
-                    chunk_elements = self.ai_client.convert_pdf_to_elements(
-                        chunk_bytes, image_report=image_report
-                    )
+                    chunk_elements = self.ai_client.convert_pdf_to_elements(chunk_bytes, image_report=image_report)
                     elements.extend(chunk_elements)
                 except Exception as e:
                     logger.error("Failed to convert chunk %d to elements: %s", i, e)

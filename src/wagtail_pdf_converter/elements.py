@@ -7,7 +7,7 @@ into a ``(block_name, value)`` StreamField tuple. This module is the single
 authoritative definition of the element stream contract shared by both sides.
 """
 
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -64,15 +64,7 @@ class ListElement(BaseModel):
 # Discriminated union on the ``type`` field so parsing routes each raw dict to
 # the correct element model.
 Element = Annotated[
-    Union[
-        HeadingElement,
-        ParagraphElement,
-        ImageElement,
-        QuoteElement,
-        CodeElement,
-        TableElement,
-        ListElement,
-    ],
+    HeadingElement | ParagraphElement | ImageElement | QuoteElement | CodeElement | TableElement | ListElement,
     Field(discriminator="type"),
 ]
 

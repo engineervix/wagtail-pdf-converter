@@ -5,7 +5,6 @@ import pytest
 from django.core.files.base import ContentFile
 from django.test import override_settings
 from django.urls import reverse
-from wagtail.models import Page
 
 from wagtail_pdf_converter.elements import ParagraphElement
 
@@ -32,7 +31,7 @@ class TestCreatePageFromDocumentView:
     def test_disabled_by_default_redirects_with_error(self, client_superuser):
         document = self._make_document()
         url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
-        response = client_superuser.post(url, follow=True)
+        client_superuser.post(url, follow=True)
         # Feature flag off -> redirected, no page created
         assert PDFPage.objects.count() == 0
 
@@ -50,7 +49,7 @@ class TestCreatePageFromDocumentView:
 
         with self._settings():
             url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
-            response = client_superuser.post(url, follow=True)
+            client_superuser.post(url, follow=True)
 
         assert PDFPage.objects.count() == 1
         page = PDFPage.objects.first()
@@ -70,5 +69,5 @@ class TestCreatePageFromDocumentView:
     def test_get_disabled_shows_error_not_confirm(self, client_superuser):
         document = self._make_document()
         url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
-        response = client_superuser.get(url, follow=True)
+        client_superuser.get(url, follow=True)
         assert PDFPage.objects.count() == 0

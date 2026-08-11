@@ -8,6 +8,7 @@ the tree-placement pattern from Wagtail's Page.add_child.
 """
 
 import logging
+
 from typing import Any
 
 from django.utils.text import slugify

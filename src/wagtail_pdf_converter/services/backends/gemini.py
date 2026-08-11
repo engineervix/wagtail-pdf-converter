@@ -359,7 +359,9 @@ class GeminiBackend(AIPDFBackend):
 
         return list(document.elements)
 
-    def convert_pdf_to_elements(self, pdf_bytes: bytes, image_report: list[dict[str, Any]] | None = None) -> "list[Element]":
+    def convert_pdf_to_elements(
+        self, pdf_bytes: bytes, image_report: list[dict[str, Any]] | None = None
+    ) -> "list[Element]":
         """
         Convert a PDF into a typed element stream using schema-constrained
         structured JSON output (response_json_schema).
@@ -375,12 +377,13 @@ class GeminiBackend(AIPDFBackend):
         base_prompt = conf_settings.PROMPTS["ELEMENT_CONVERSION_TEMPLATE"]
         image_section = self._format_image_report_for_elements(image_report or [])
         prompt = f"{base_prompt}\n\n{image_section}"
+        contents: list[Any] = [
+            prompt,
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        ]
         response = self.client.models.generate_content(
             model=self.conversion_model,
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            ],
+            contents=contents,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_json_schema=DocumentElements.response_json_schema(),

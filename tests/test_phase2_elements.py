@@ -1,5 +1,3 @@
-import pytest
-
 from wagtail_pdf_converter.elements import (
     DocumentElements,
     ImageElement,

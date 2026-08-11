@@ -2,26 +2,46 @@
 
 import django.db.models.deletion
 import wagtail.fields
+
 from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('testapp', '0002_add_documentconversion'),
-        ('wagtailcore', '0097_baselogentry_uuid_action_timestamp_indexes'),
+        ("testapp", "0002_add_documentconversion"),
+        ("wagtailcore", "0097_baselogentry_uuid_action_timestamp_indexes"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='PDFPage',
+            name="PDFPage",
             fields=[
-                ('page_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='wagtailcore.page')),
-                ('body', wagtail.fields.StreamField([('heading', 0), ('paragraph', 1)], blank=True, block_lookup={0: ('wagtail.blocks.CharBlock', (), {'form_classname': 'title'}), 1: ('wagtail.blocks.RichTextBlock', (), {})})),
+                (
+                    "page_ptr",
+                    models.OneToOneField(
+                        auto_created=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        parent_link=True,
+                        primary_key=True,
+                        serialize=False,
+                        to="wagtailcore.page",
+                    ),
+                ),
+                (
+                    "body",
+                    wagtail.fields.StreamField(
+                        [("heading", 0), ("paragraph", 1)],
+                        blank=True,
+                        block_lookup={
+                            0: ("wagtail.blocks.CharBlock", (), {"form_classname": "title"}),
+                            1: ("wagtail.blocks.RichTextBlock", (), {}),
+                        },
+                    ),
+                ),
             ],
             options={
-                'abstract': False,
+                "abstract": False,
             },
-            bases=('wagtailcore.page',),
+            bases=("wagtailcore.page",),
         ),
     ]
