@@ -3,6 +3,7 @@ import pytest
 from wagtail.models import Page
 
 from wagtail_pdf_converter.elements import HeadingElement, ParagraphElement
+from wagtail_pdf_converter.mapper import MapperRegistry, StreamFieldMapper
 from wagtail_pdf_converter.services.page_creator import create_page_from_elements
 
 from .testproject.testapp.models import PDFPage
@@ -34,19 +35,26 @@ class TestCreatePageFromElements:
         assert str(body[1].value) == "Our performance this year."
 
     def test_unknown_block_type_falls_back_to_paragraph(self):
-        """No content is silently dropped even if a block type is unregistered."""
+        """A block name the page's StreamField doesn't define (e.g. from a
+        custom mapper) must be routed to paragraph, not silently dropped by
+        Wagtail's StreamBlock. PDFPage has no 'hero' block, so this exercises
+        the loader's own fallback, not the mapper's."""
         root = Page.objects.get(id=2)
-        elements = [
-            ParagraphElement(type="paragraph", text="orphan"),
-        ]
-        # Force an unknown element type through the mapper path.
+        registry = MapperRegistry()
+        registry.register("heading", lambda el: ("hero", el.text))
+        mapper = StreamFieldMapper(registry)
+
+        elements = [HeadingElement(type="heading", level=1, text="orphan")]
+
         page = create_page_from_elements(
             title="Fallback Test",
             elements=elements,
             parent=root,
             page_model=PDFPage,
+            mapper=mapper,
         )
         assert [b.block_type for b in page.body] == ["paragraph"]
+        assert str(page.body[0].value) == "orphan"
 
     def test_page_is_child_of_parent(self):
         root = Page.objects.get(id=2)
