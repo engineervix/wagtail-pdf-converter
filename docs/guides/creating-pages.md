@@ -6,7 +6,7 @@ icon: lucide/file-output
 
 By default the package converts a PDF to Markdown and renders that as HTML. This guide covers the **optional** alternative: turning a PDF into a real Wagtail **Page** with a StreamField body, so the content gets the full editor workflow — blocks, revisions, moderation, and previews — like any other page.
 
-The feature is opt-in. Markdown conversion remains the default and is unaffected.
+The feature is opt-in. Markdown conversion remains the default and is unaffected. The two also trigger differently: Markdown conversion runs automatically whenever an eligible document is saved, but page creation is a manual, per-document action — nothing happens until an editor clicks **Create page from PDF**.
 
 ## How it works
 
