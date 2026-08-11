@@ -33,6 +33,31 @@ class DocumentLoggerAdapter(logging.LoggerAdapter):
 logger = DocumentLoggerAdapter(logging.getLogger(__name__), {"document_id": None})
 
 
+def dedup_chunk_boundary(accumulated: "list[Any]", new: "list[Any]") -> "list[Any]":
+    """
+    Remove overlap between the end of ``accumulated`` and the start of ``new``.
+
+    Chunks are converted with page overlap, so content from the shared page can
+    appear as elements at the end of one chunk and the start of the next. This
+    finds the largest trailing run of ``accumulated`` that exactly matches a
+    leading run of ``new`` (same type and content) and drops it from ``new``.
+
+    Only the immediate seam is considered: duplicates elsewhere are legitimate
+    content and are preserved. Returns the portion of ``new`` to append.
+    """
+    if not accumulated or not new:
+        return list(new)
+
+    # Largest k such that accumulated[-k:] == new[:k]. k can be at most the
+    # shorter of the two lengths.
+    max_k = min(len(accumulated), len(new))
+    overlap = 0
+    for k in range(1, max_k + 1):
+        if accumulated[-k:] == new[:k]:
+            overlap = k
+    return list(new[overlap:])
+
+
 class HybridPDFConverter:
     """
     A hybrid PDF converter that extracts images and converts content to markdown.
@@ -513,7 +538,9 @@ class HybridPDFConverter:
             for i, chunk_bytes in enumerate(chunks, 1):
                 try:
                     chunk_elements = self.ai_client.convert_pdf_to_elements(chunk_bytes, image_report=image_report)
-                    elements.extend(chunk_elements)
+                    # Drop elements duplicated from the overlap page shared with
+                    # the previous chunk before appending.
+                    elements.extend(dedup_chunk_boundary(elements, chunk_elements))
                 except Exception as e:
                     logger.error("Failed to convert chunk %d to elements: %s", i, e)
         else:
