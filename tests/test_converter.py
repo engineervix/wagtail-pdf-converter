@@ -3,6 +3,7 @@ from unittest import mock
 import factory
 
 from django.test import SimpleTestCase, override_settings
+from google.api_core import exceptions as google_exceptions
 from google.genai import errors as google_genai_errors
 from tenacity import RetryError, stop_after_attempt, wait_none
 
@@ -350,20 +351,23 @@ class TestPDFConverter(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # Update the retry policy on the AIClient method
-        cls._retry_obj = (
-            backends.gemini.GeminiBackend.convert_content_with_retry.retry  # type: ignore[attr-defined]
-        )
-        cls._old_wait = cls._retry_obj.wait
-        cls._old_stop = cls._retry_obj.stop
-        cls._retry_obj.wait = wait_none()
-        cls._retry_obj.stop = stop_after_attempt(1)
+        # Update the retry policy on the AIClient methods that carry one, so
+        # tests exhaust retries instantly instead of waiting for real backoff.
+        cls._retry_objs = [
+            backends.gemini.GeminiBackend.convert_content_with_retry.retry,  # type: ignore[attr-defined]
+            backends.gemini.GeminiBackend.convert_pdf_to_elements.retry,  # type: ignore[attr-defined]
+        ]
+        cls._old_policies = [(r.wait, r.stop) for r in cls._retry_objs]
+        for retry_obj in cls._retry_objs:
+            retry_obj.wait = wait_none()
+            retry_obj.stop = stop_after_attempt(1)
 
     @classmethod
     def tearDownClass(cls):
-        # Restore original retry policy
-        cls._retry_obj.wait = cls._old_wait
-        cls._retry_obj.stop = cls._old_stop
+        # Restore original retry policies
+        for retry_obj, (old_wait, old_stop) in zip(cls._retry_objs, cls._old_policies, strict=True):
+            retry_obj.wait = old_wait
+            retry_obj.stop = old_stop
         super().tearDownClass()
 
     @override_settings(
@@ -519,6 +523,96 @@ class TestPDFConverter(SimpleTestCase):
 
         # Verify it attempted to call the API
         # (with our test setup of stop_after_attempt(1), it should be called once)
+        self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_server_error_triggers_retry(self, mock_client):
+        """convert_pdf_to_elements must retry transient errors, same as the
+        markdown path's convert_content_with_retry — it didn't before."""
+        server_error = google_genai_errors.ServerError(
+            503,
+            {"error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}},
+            None,
+        )
+        mock_generate_content = mock.Mock(side_effect=server_error)
+        mock_client.return_value.models.generate_content = mock_generate_content
+
+        converter = services.HybridPDFConverter()
+
+        with self.assertRaises(RetryError) as context:
+            converter.ai_client.convert_pdf_to_elements(b"test pdf content")
+
+        self.assertIsInstance(context.exception.last_attempt.exception(), google_genai_errors.ServerError)
+        # stop_after_attempt(1) in setUpClass -> exactly one call.
+        self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_429_client_error_is_normalized_and_retried(self, mock_client):
+        """A 429 surfacing as ClientError must be converted to ResourceExhausted
+        so tenacity's retry_if_exception_type actually catches it."""
+        rate_limit_error = google_genai_errors.ClientError(
+            429,
+            {"error": {"code": 429, "message": "Too many requests", "status": "RESOURCE_EXHAUSTED"}},
+            None,
+        )
+        mock_generate_content = mock.Mock(side_effect=rate_limit_error)
+        mock_client.return_value.models.generate_content = mock_generate_content
+
+        converter = services.HybridPDFConverter()
+
+        with self.assertRaises(RetryError) as context:
+            converter.ai_client.convert_pdf_to_elements(b"test pdf content")
+
+        self.assertIsInstance(context.exception.last_attempt.exception(), google_exceptions.ResourceExhausted)
+        self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_non_retryable_client_error_is_not_retried(self, mock_client):
+        """A genuine 4xx (bad request) must not be retried or masked — it
+        should propagate immediately, not wrapped in RetryError."""
+        bad_request_error = google_genai_errors.ClientError(
+            400,
+            {"error": {"code": 400, "message": "Bad request", "status": "INVALID_ARGUMENT"}},
+            None,
+        )
+        mock_generate_content = mock.Mock(side_effect=bad_request_error)
+        mock_client.return_value.models.generate_content = mock_generate_content
+
+        converter = services.HybridPDFConverter()
+
+        with self.assertRaises(google_genai_errors.ClientError):
+            converter.ai_client.convert_pdf_to_elements(b"test pdf content")
+
         self.assertEqual(mock_generate_content.call_count, 1)
 
     @override_settings(

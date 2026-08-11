@@ -30,6 +30,16 @@ logger = logging.getLogger(__name__)
 # keeps a parse failure from dumping an unbounded blob into a page.
 FALLBACK_TEXT_MAX_CHARS = 2000
 
+# Transient failures worth retrying with backoff, per Gemini API guidance.
+# Shared between convert_content_with_retry and convert_pdf_to_elements so
+# both API call sites agree on what counts as retryable.
+RETRYABLE_GEMINI_EXCEPTIONS = (
+    google_exceptions.InternalServerError,
+    google_exceptions.ResourceExhausted,
+    google_exceptions.ServiceUnavailable,
+    google_genai_errors.ServerError,
+)
+
 
 class GeminiBackend(AIPDFBackend):
     """
@@ -201,15 +211,7 @@ class GeminiBackend(AIPDFBackend):
     @retry(
         wait=wait_exponential(multiplier=2, min=5, max=120),
         stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(
-            (
-                google_exceptions.InternalServerError,
-                google_exceptions.ResourceExhausted,
-                google_exceptions.ServiceUnavailable,
-                google_genai_errors.ServerError,
-                PDFConversionError,
-            )
-        ),
+        retry=retry_if_exception_type((*RETRYABLE_GEMINI_EXCEPTIONS, PDFConversionError)),
     )
     def convert_content_with_retry(self, contents: list[Any]) -> str:
         """Generic content conversion call with error handling and retries."""
@@ -234,12 +236,7 @@ class GeminiBackend(AIPDFBackend):
 
         except PDFConversionError as e:
             raise e
-        except (
-            google_exceptions.InternalServerError,
-            google_exceptions.ResourceExhausted,
-            google_exceptions.ServiceUnavailable,
-            google_genai_errors.ServerError,
-        ) as e:
+        except RETRYABLE_GEMINI_EXCEPTIONS as e:
             logger.warning(f"API call failed with {type(e).__name__}. Retrying...")
             raise e
         except google_genai_errors.ClientError as e:
@@ -372,12 +369,22 @@ class GeminiBackend(AIPDFBackend):
 
         return elements
 
+    @retry(
+        wait=wait_exponential(multiplier=2, min=5, max=120),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type(RETRYABLE_GEMINI_EXCEPTIONS),
+    )
     def convert_pdf_to_elements(
         self, pdf_bytes: bytes, image_report: list[dict[str, Any]] | None = None
     ) -> "list[Element]":
         """
         Convert a PDF into a typed element stream using schema-constrained
         structured JSON output (response_json_schema).
+
+        Retries on the same transient errors as convert_content_with_retry.
+        Unlike that method, an empty/blocked response is not itself treated as
+        an error here: parse_elements_response already turns it into a
+        fallback paragraph, so content is never lost either way.
 
         Args:
             pdf_bytes: The source PDF.
@@ -394,12 +401,21 @@ class GeminiBackend(AIPDFBackend):
             prompt,
             types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
         ]
-        response = self.client.models.generate_content(
-            model=self.conversion_model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_json_schema=DocumentElements.response_json_schema(),
-            ),
-        )
+        try:
+            response = self.client.models.generate_content(
+                model=self.conversion_model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=DocumentElements.response_json_schema(),
+                ),
+            )
+        except google_genai_errors.ClientError as e:
+            # Same 429-as-ResourceExhausted normalization as
+            # convert_content_with_retry: some 429s surface as ClientError
+            # rather than the dedicated ResourceExhausted type.
+            if e.code == HTTPStatus.TOO_MANY_REQUESTS:
+                logger.warning("Rate limit hit (429) during element conversion. Retrying...")
+                raise google_exceptions.ResourceExhausted("Rate limit exceeded (429)") from e
+            raise
         return self.parse_elements_response(response.text or "")
