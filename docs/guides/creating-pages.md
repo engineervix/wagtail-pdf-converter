@@ -121,7 +121,7 @@ def hero_heading(element):
     # Send top-level headings to a custom "hero" block instead of "heading".
     if element.level == 1:
         return ("hero", element.text)
-    return ("heading", element.text)
+    return ("heading", {"text": element.text, "level": element.level})
 
 
 registry = MapperRegistry()
@@ -136,6 +136,44 @@ The registry always keeps a **paragraph fallback**: any element type without a r
 
 !!! note
     Your page model's `body` StreamField must define a block for every name your converters emit. If a converter returns a block name the StreamField doesn't have, the loader falls back to a paragraph for that block.
+
+## Adding a new element type
+
+The built-in types (heading, paragraph, image, quote, code, table, list) are a baseline, not a ceiling. To support something the kit doesn't cover — a callout box, a figure with a caption, a definition list — register a custom element type. This teaches the parser *and* the AI's output schema about it, so the new type flows end-to-end: PDF → AI → element → block.
+
+Three steps:
+
+**1. Define the element.** Subclass `BaseElement` with a `type` literal and the fields it needs:
+
+```python
+from typing import Literal
+from wagtail_pdf_converter.elements import BaseElement
+
+
+class CalloutElement(BaseElement):
+    type: Literal["callout"]
+    text: str
+    variant: str = "info"
+```
+
+**2. Register it.** Pass a one-line `description` telling the AI when to emit it:
+
+```python
+from wagtail_pdf_converter.elements import register_element_type
+
+register_element_type(
+    CalloutElement,
+    description="A highlighted callout/admonition box. Provide `text` and `variant` (one of info, warning, danger).",
+)
+```
+
+**3. Map it to a block** on a custom registry, and make sure your page's StreamField defines that block:
+
+```python
+registry.register("callout", lambda el: ("callout", {"text": el.text, "variant": el.variant}))
+```
+
+Anything the AI emits that has no registered converter (or no matching block on the page) still falls back to a paragraph, so experimenting with a new type is safe — content is never lost while you iterate.
 
 ## Which PDFs make good pages?
 

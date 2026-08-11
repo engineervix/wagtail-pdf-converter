@@ -392,9 +392,19 @@ class GeminiBackend(AIPDFBackend):
                 provided, image hashes are exposed to the model so it can emit
                 ``image`` elements that reference stored Wagtail Images.
         """
-        from ...elements import DocumentElements
+        from ...elements import DocumentElements, custom_element_prompt_lines
 
         base_prompt = conf_settings.PROMPTS["ELEMENT_CONVERSION_TEMPLATE"]
+
+        # Advertise any site-registered custom element types so the AI can emit them.
+        custom_lines = custom_element_prompt_lines()
+        if custom_lines:
+            base_prompt = (
+                base_prompt.rstrip()
+                + "\n\n**Additional element types available for this site:**\n"
+                + "\n".join(custom_lines)
+            )
+
         image_section = self._format_image_report_for_elements(image_report or [])
         prompt = f"{base_prompt}\n\n{image_section}"
         contents: list[Any] = [
