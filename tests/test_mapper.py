@@ -26,7 +26,7 @@ class TestStreamFieldMapper:
         mapper = StreamFieldMapper()
         elements = [HeadingElement(type="heading", level=2, text="Section")]
         result = mapper.map(elements)
-        assert result == [("heading", "Section")]
+        assert result == [("heading", {"text": "Section", "level": 2})]
 
     def test_maps_paragraph_to_block_tuple(self):
         mapper = StreamFieldMapper()

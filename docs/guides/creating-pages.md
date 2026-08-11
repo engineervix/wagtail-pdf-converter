@@ -86,6 +86,27 @@ page = convert_pdf_to_page(
 
 For finer control, `create_page_from_elements` takes a pre-built element stream directly (no AI call), which is also how the feature is tested.
 
+## Styling the blocks
+
+Each block in the kit renders through a template that carries a stable `pdf-page-*` class, so you can style PDF-derived content from your own stylesheet without touching the package:
+
+| Block       | Class                  | Notes                                            |
+| ----------- | ---------------------- | ------------------------------------------------ |
+| `heading`   | `.pdf-page-heading`    | Also `.pdf-page-heading--1` … `--6` by level.     |
+| `paragraph` | `.pdf-page-paragraph`  |                                                  |
+| `image`     | `.pdf-page-image`      | Uses Wagtail's image block output.               |
+| `quote`     | `.pdf-page-quote`      | Attribution in `.pdf-page-quote-attribution`.    |
+| `code`      | `.pdf-page-code`       | Also `.pdf-page-code--{language}`.               |
+| `table`     | `.pdf-page-table`      |                                                  |
+| `list`      | `.pdf-page-list`       | Also `.pdf-page-list--ordered` for numbered lists.|
+
+```css
+.pdf-page-table { width: 100%; border-collapse: collapse; }
+.pdf-page-code  { background: #f5f5f5; padding: 1em; }
+```
+
+The package ships **no styles of its own** — appearance belongs to your site. For full control over markup, override any block's template: create `templates/wagtail_pdf_converter/blocks/<name>.html` in your project and it takes precedence over the bundled one.
+
 ## Customising blocks
 
 The default block kit covers the common cases, but every site is different. You can override how an element type maps to a block — or which block it uses — by registering your own converter.

@@ -29,7 +29,8 @@ FALLBACK_BLOCK = "paragraph"
 
 
 def _heading_converter(element: Element) -> tuple[str, Any]:
-    return ("heading", cast("HeadingElement", element).text)
+    el = cast("HeadingElement", element)
+    return ("heading", {"text": el.text, "level": el.level})
 
 
 def _paragraph_converter(element: Element) -> tuple[str, Any]:
