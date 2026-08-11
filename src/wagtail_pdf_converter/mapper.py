@@ -64,7 +64,14 @@ def _list_converter(element: Element) -> tuple[str, Any]:
 
 
 class MapperRegistry:
-    """Registry of element-type -> converter, with a guaranteed fallback."""
+    """Registry of element-type -> converter, with a guaranteed fallback.
+
+    Precedence for unmapped element types: a converter registered under the
+    "paragraph" key (if any) always wins over the ``fallback`` passed to the
+    constructor. This matters if you build a registry from scratch with a
+    custom ``fallback=`` but also ``register("paragraph", ...)`` a converter
+    of your own — the registered one is used, not the constructor argument.
+    """
 
     def __init__(self, fallback: Converter | None = None) -> None:
         self._converters: dict[str, Converter] = {}
@@ -77,6 +84,11 @@ class MapperRegistry:
         return self._converters.get(element_type)
 
     def get_fallback(self) -> Converter:
+        """Fallback converter for unmapped element types.
+
+        Returns the converter registered under ``FALLBACK_BLOCK`` ("paragraph")
+        if one exists, otherwise the ``fallback`` given to the constructor.
+        """
         return self._converters.get(FALLBACK_BLOCK, self._fallback)
 
 
