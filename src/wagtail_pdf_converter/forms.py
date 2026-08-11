@@ -69,6 +69,15 @@ class PDFConverterDocumentForm(BaseDocumentForm):
         else:
             del self.fields["conversion_status_display"]
 
+    def _show_create_page_button(self) -> bool:
+        """Show 'Create page' only for PDFs when page creation is fully configured."""
+        return bool(
+            getattr(self.instance, "is_pdf", False)
+            and pdf_settings.ENABLE_PAGE_CREATION
+            and pdf_settings.PAGE_CREATION_MODEL
+            and pdf_settings.PAGE_CREATION_PARENT_ID
+        )
+
     def _setup_conversion_actions_field(self):
         buttons = []
 
@@ -88,6 +97,16 @@ class PDFConverterDocumentForm(BaseDocumentForm):
                 format_html(
                     '<a href="{}" class="button button-small button-secondary">Retry conversion</a>',
                     retry_url,
+                )
+            )
+
+        if self._show_create_page_button():
+            create_url = reverse("wagtail_pdf_converter:create_page", args=[self.instance.pk])
+            buttons.append(
+                format_html(
+                    '<a href="{}" class="button button-small button-secondary"'
+                    ' style="margin-left: 10px;">Create page</a>',
+                    create_url,
                 )
             )
 

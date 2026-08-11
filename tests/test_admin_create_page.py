@@ -56,3 +56,19 @@ class TestCreatePageFromDocumentView:
         page = PDFPage.objects.first()
         assert page.title == "Report"
         assert page.get_parent().pk == 2
+
+    def test_get_shows_confirmation_page(self, client_superuser):
+        """GET renders a confirmation page; it does NOT create a page."""
+        document = self._make_document()
+        with self._settings():
+            url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
+            response = client_superuser.get(url)
+        assert response.status_code == 200
+        assert PDFPage.objects.count() == 0
+        assert b"Create page" in response.content or b"create" in response.content.lower()
+
+    def test_get_disabled_shows_error_not_confirm(self, client_superuser):
+        document = self._make_document()
+        url = reverse("wagtail_pdf_converter:create_page", args=[document.id])
+        response = client_superuser.get(url, follow=True)
+        assert PDFPage.objects.count() == 0

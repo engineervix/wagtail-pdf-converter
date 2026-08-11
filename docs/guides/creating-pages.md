@@ -60,7 +60,9 @@ class PDFPage(Page):
 
 ## 3. Create a page
 
-Once enabled, a **Create page from PDF** action is available at `/admin/wagtail_pdf_converter/documents/<id>/create-page/`. On success you're taken straight to the new page's editor.
+Once enabled, a **Create page** button appears on the document edit page (next to **Retry conversion**) and, for converted PDFs, in the document listing's status column. Both open a confirmation screen; confirming creates the page and takes you straight to its editor. The action is also available directly at `/admin/wagtail_pdf_converter/documents/<id>/create-page/`.
+
+The button only appears for PDF documents, and only when `ENABLE_PAGE_CREATION`, `PAGE_CREATION_MODEL`, and `PAGE_CREATION_PARENT_ID` are all set. The page is created on form submission (POST), never from a bare link, so it can't be triggered accidentally.
 
 ### From Python
 

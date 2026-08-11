@@ -105,6 +105,12 @@ class ConversionStatusColumn(Column):
         context["started_at"] = value["started_at"]
         context["view_url"] = reverse("wagtail_pdf_converter_document_html", args=(value["id"],))
         context["retry_url"] = reverse("wagtail_pdf_converter:retry_conversion", args=(value["id"],))
+        context["show_create_page"] = bool(
+            pdf_settings.ENABLE_PAGE_CREATION
+            and pdf_settings.PAGE_CREATION_MODEL
+            and pdf_settings.PAGE_CREATION_PARENT_ID
+        )
+        context["create_page_url"] = reverse("wagtail_pdf_converter:create_page", args=(value["id"],))
         return context
 
 
@@ -227,7 +233,14 @@ def _build_converter():
 
 @require_admin_access
 def create_page_from_document(request: "HttpRequest", document_id: int) -> Any:
-    """Create a Wagtail Page from a PDF document's content (opt-in feature)."""
+    """
+    Create a Wagtail Page from a PDF document's content (opt-in feature).
+
+    GET renders a confirmation page; the page is only created on POST so the
+    state-changing action is CSRF-protected and never triggered by a bare link.
+    """
+    document = get_object_or_404(Document, id=document_id)
+
     if not pdf_settings.ENABLE_PAGE_CREATION:
         messages.error(request, _("PDF-to-page creation is not enabled."))
         return redirect("wagtaildocs:index")
@@ -241,17 +254,26 @@ def create_page_from_document(request: "HttpRequest", document_id: int) -> Any:
         )
         return redirect("wagtaildocs:index")
 
-    document = get_object_or_404(Document, id=document_id)
-
     from wagtail.models import Page
-
-    from wagtail_pdf_converter.services.page_creator import convert_pdf_to_page
 
     try:
         parent = Page.objects.get(pk=parent_id)
     except Page.DoesNotExist:
         messages.error(request, _("Configured parent page (id=%(id)s) does not exist.") % {"id": parent_id})
         return redirect("wagtaildocs:index")
+
+    if request.method == "GET":
+        return render(
+            request,
+            "wagtail_pdf_converter/admin/confirm_create_page.html",
+            {
+                "document": document,
+                "parent_page": parent,
+                "page_model_name": page_model.__name__ if hasattr(page_model, "__name__") else str(page_model),
+            },
+        )
+
+    from wagtail_pdf_converter.services.page_creator import convert_pdf_to_page
 
     try:
         page = convert_pdf_to_page(
