@@ -51,6 +51,7 @@ nav = [
   { "Guides" = [
     { "Overview" = "guides/index.md" },
     { "Accessing converted content" = "guides/accessing-content.md" },
+    { "Creating pages from PDFs" = "guides/creating-pages.md" },
     { "Customising templates" = "guides/customising-templates.md" },
     { "Admin UI" = "guides/admin-ui.md" },
     { "Management commands" = "guides/management-commands.md" },
