@@ -216,3 +216,54 @@ def retry_conversion(request: "HttpRequest", document_id: int) -> Any:
 
     messages.success(request, _("Conversion retry initiated."))
     return redirect("wagtaildocs:index")
+
+
+def _build_converter():
+    """Build the PDF converter. Module-level seam so tests can inject a stub."""
+    from wagtail_pdf_converter.services.converter import HybridPDFConverter
+
+    return HybridPDFConverter()
+
+
+@require_admin_access
+def create_page_from_document(request: "HttpRequest", document_id: int) -> Any:
+    """Create a Wagtail Page from a PDF document's content (opt-in feature)."""
+    if not pdf_settings.ENABLE_PAGE_CREATION:
+        messages.error(request, _("PDF-to-page creation is not enabled."))
+        return redirect("wagtaildocs:index")
+
+    page_model = pdf_settings.PAGE_CREATION_MODEL
+    parent_id = pdf_settings.PAGE_CREATION_PARENT_ID
+    if not page_model or not parent_id:
+        messages.error(
+            request,
+            _("PDF page creation requires PAGE_CREATION_MODEL and PAGE_CREATION_PARENT_ID to be configured."),
+        )
+        return redirect("wagtaildocs:index")
+
+    document = get_object_or_404(Document, id=document_id)
+
+    from wagtail.models import Page
+
+    from wagtail_pdf_converter.services.page_creator import convert_pdf_to_page
+
+    try:
+        parent = Page.objects.get(pk=parent_id)
+    except Page.DoesNotExist:
+        messages.error(request, _("Configured parent page (id=%(id)s) does not exist.") % {"id": parent_id})
+        return redirect("wagtaildocs:index")
+
+    try:
+        page = convert_pdf_to_page(
+            document,
+            parent=parent,
+            page_model=page_model,
+            user=request.user,
+            converter=_build_converter(),
+        )
+    except Exception as e:
+        messages.error(request, _("Failed to create page: %(error)s") % {"error": e})
+        return redirect("wagtaildocs:index")
+
+    messages.success(request, _("Page '%(title)s' created.") % {"title": page.title})
+    return redirect("wagtailadmin_pages:edit", page.id)

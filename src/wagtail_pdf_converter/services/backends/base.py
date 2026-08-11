@@ -69,3 +69,13 @@ class AIPDFBackend(ABC):
         Convert a full PDF in a single API call.
         """
         pass
+
+    def convert_pdf_to_elements(self, pdf_bytes: bytes, image_report: "list[Any] | None" = None) -> "list[Any]":
+        """
+        Convert a PDF into a typed element stream (heading/paragraph/...) using
+        schema-constrained structured output.
+
+        Concrete (not abstract) so existing third-party backends do not break;
+        backends that support structured output should override this.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support element conversion.")

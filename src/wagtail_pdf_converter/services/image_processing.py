@@ -1,4 +1,5 @@
 import concurrent.futures
+import hashlib
 import logging
 
 from io import BytesIO
@@ -420,12 +421,16 @@ class ImageProcessor:
                     description=description,  # Use AI-generated description
                 )
 
-                # Add to results
+                # Add to results. The content hash matches the Image.file_hash
+                # assigned by add_image_to_wagtail_collection, and is the stable
+                # identity used to link an AI-emitted image element back to the
+                # stored Image when building StreamField pages.
                 result = {
                     "page": img_data["page_num"],
                     "image_name": image_name,
                     "description": description,
                     "url": image_url,
+                    "image_hash": hashlib.sha1(img_data["bytes"], usedforsecurity=False).hexdigest(),
                 }
                 results.append(result)
 

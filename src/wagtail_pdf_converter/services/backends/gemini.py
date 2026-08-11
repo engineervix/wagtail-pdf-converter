@@ -1,3 +1,4 @@
+import json
 import logging
 
 from http import HTTPStatus
@@ -16,6 +17,7 @@ from tenacity import (
 )
 
 from ...conf import settings as conf_settings
+from ...elements import Element
 from ...utils import get_mime_type_from_bytes
 from ..base import PDFConversionError
 from .base import AIPDFBackend
@@ -178,6 +180,19 @@ class GeminiBackend(AIPDFBackend):
         """
         return conf_settings.PROMPTS["PDF_CONVERSION_TEMPLATE"].format(image_report=image_report)
 
+    def _format_image_report_for_elements(self, image_report: list[dict[str, Any]]) -> str:
+        """Format the image report for element conversion, exposing the content hash."""
+        if not image_report:
+            return "No images were found in this document."
+
+        report_lines = ["EXTRACTED IMAGES (reference images by their HASH):"]
+        for img_info in image_report:
+            report_lines.append(f"- Page {img_info['page']}: {img_info['description']}")
+            report_lines.append(f"  HASH: {img_info.get('image_hash', '')}")
+            report_lines.append("")
+
+        return "\n".join(report_lines)
+
     @retry(
         wait=wait_exponential(multiplier=2, min=5, max=120),
         stop=stop_after_attempt(5),
@@ -302,3 +317,73 @@ class GeminiBackend(AIPDFBackend):
                 ),
             ]
         )
+
+    def parse_elements_response(self, raw_text: str) -> "list[Element]":
+        """
+        Parse and validate the AI's structured JSON output into typed elements.
+
+        Deterministic and network-free. On any parse/validation failure, or on
+        an empty result, returns a single fallback paragraph element carrying
+        the offending text so that content is never silently lost.
+        """
+        from pydantic import ValidationError
+
+        from ...elements import DocumentElements, ParagraphElement
+
+        text = raw_text.strip()
+        # Strip a markdown code fence if the model wrapped the JSON in one.
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Drop the opening fence (```json / ```) and the closing fence.
+            lines = [line for line in lines if not line.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+
+        def _fallback() -> "list[Element]":
+            return [ParagraphElement(type="paragraph", text=raw_text.strip() or "[Unparsed PDF content]")]
+
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Element conversion returned non-JSON output; using fallback paragraph.")
+            return _fallback()
+
+        try:
+            document = DocumentElements.model_validate(data)
+        except ValidationError:
+            logger.warning("Element output failed schema validation; using fallback paragraph.")
+            return _fallback()
+
+        if not document.elements:
+            logger.warning("Element output was empty; using fallback paragraph.")
+            return _fallback()
+
+        return list(document.elements)
+
+    def convert_pdf_to_elements(self, pdf_bytes: bytes, image_report: list[dict[str, Any]] | None = None) -> "list[Element]":
+        """
+        Convert a PDF into a typed element stream using schema-constrained
+        structured JSON output (response_json_schema).
+
+        Args:
+            pdf_bytes: The source PDF.
+            image_report: Extracted-image report (from the image pipeline). When
+                provided, image hashes are exposed to the model so it can emit
+                ``image`` elements that reference stored Wagtail Images.
+        """
+        from ...elements import DocumentElements
+
+        base_prompt = conf_settings.PROMPTS["ELEMENT_CONVERSION_TEMPLATE"]
+        image_section = self._format_image_report_for_elements(image_report or [])
+        prompt = f"{base_prompt}\n\n{image_section}"
+        response = self.client.models.generate_content(
+            model=self.conversion_model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_json_schema=DocumentElements.response_json_schema(),
+            ),
+        )
+        return self.parse_elements_response(response.text or "")
