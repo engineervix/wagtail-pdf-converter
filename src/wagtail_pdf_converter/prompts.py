@@ -389,6 +389,28 @@ CONTINUATION REQUIREMENTS:
 Continue the markdown conversion now:
 """
 
+DEFAULT_ELEMENT_CONVERSION_PROMPT_TEMPLATE: str = """Analyse this PDF document and decompose it into a structured sequence of typed content elements, optimised for web accessibility and faithful to the source.
+
+Classify each distinct piece of content as one of the supported element types and preserve the document's reading order exactly.
+
+**Element types:**
+- `heading`: A section heading. Provide `level` (1-6) reflecting the true document hierarchy, and `text`.
+- `paragraph`: A block of body text. Provide `text`.
+- `image`: A meaningful image, chart, or figure. Provide `image_hash` (the exact hash from the supplied image report) and `alt` (a concise, accessible description).
+- `quote`: A quotation or pull-quote. Provide `text` and, if present, `attribution`.
+- `code`: A block of source code. Provide `code` and, if identifiable, `language`.
+- `table`: Tabular data. Provide `header` (list of column titles, may be empty) and `rows` (list of rows, each a list of cell strings).
+- `list`: A bulleted or numbered list. Provide `ordered` (true for numbered), and `items` (list of item strings).
+
+**Rules:**
+1. Preserve reading order across the whole document.
+2. Maintain the correct heading hierarchy; do not skip levels.
+3. Skip cover-page furniture, page numbers, headers/footers, and tables of contents.
+4. Do not summarise, paraphrase, or omit body content — transcribe it.
+5. For images, only emit an `image` element when the image's hash appears in the supplied image report; never invent a hash.
+6. Return only the structured elements; no conversational text.
+"""
+
 DEFAULT_CONVERSATIONAL_PHRASES: list[str] = [
     "no problem, i can help",
     "please provide the pdf",

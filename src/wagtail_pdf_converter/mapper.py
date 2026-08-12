@@ -1,0 +1,119 @@
+"""
+Maps the typed element stream to StreamField block tuples.
+
+A converter is a callable taking an element and returning a
+``(block_name, value)`` tuple. The registry maps element ``type`` strings to
+converters and supplies a paragraph fallback so that unmapped content is never
+silently dropped — Wagtail's ``StreamBlock`` discards block types it does not
+recognise, so every element must resolve to a registered block name.
+"""
+
+from collections.abc import Callable
+from typing import Any, cast
+
+from .elements import (
+    CodeElement,
+    Element,
+    HeadingElement,
+    ImageElement,
+    ListElement,
+    ParagraphElement,
+    QuoteElement,
+    TableElement,
+)
+
+
+Converter = Callable[[Element], tuple[str, Any]]
+
+FALLBACK_BLOCK = "paragraph"
+
+
+def _heading_converter(element: Element) -> tuple[str, Any]:
+    el = cast("HeadingElement", element)
+    return ("heading", {"text": el.text, "level": el.level})
+
+
+def _paragraph_converter(element: Element) -> tuple[str, Any]:
+    return ("paragraph", cast("ParagraphElement", element).text)
+
+
+def _image_converter(element: Element) -> tuple[str, Any]:
+    # Pure: pass the content hash + alt through so the loader can resolve the
+    # already-stored Wagtail Image by hash (no DB access here).
+    el = cast(ImageElement, element)
+    return ("image", {"image_hash": el.image_hash, "alt": el.alt})
+
+
+def _quote_converter(element: Element) -> tuple[str, Any]:
+    el = cast(QuoteElement, element)
+    return ("quote", {"text": el.text, "attribution": el.attribution})
+
+
+def _code_converter(element: Element) -> tuple[str, Any]:
+    el = cast(CodeElement, element)
+    return ("code", {"code": el.code, "language": el.language})
+
+
+def _table_converter(element: Element) -> tuple[str, Any]:
+    el = cast(TableElement, element)
+    return ("table", {"header": el.header, "rows": el.rows})
+
+
+def _list_converter(element: Element) -> tuple[str, Any]:
+    el = cast(ListElement, element)
+    return ("list", {"ordered": el.ordered, "items": el.items})
+
+
+class MapperRegistry:
+    """Registry of element-type -> converter, with a guaranteed fallback.
+
+    Precedence for unmapped element types: a converter registered under the
+    "paragraph" key (if any) always wins over the ``fallback`` passed to the
+    constructor. This matters if you build a registry from scratch with a
+    custom ``fallback=`` but also ``register("paragraph", ...)`` a converter
+    of your own — the registered one is used, not the constructor argument.
+    """
+
+    def __init__(self, fallback: Converter | None = None) -> None:
+        self._converters: dict[str, Converter] = {}
+        self._fallback = fallback or _paragraph_converter
+
+    def register(self, element_type: str, converter: Converter) -> None:
+        self._converters[element_type] = converter
+
+    def get(self, element_type: str) -> Converter | None:
+        return self._converters.get(element_type)
+
+    def get_fallback(self) -> Converter:
+        """Fallback converter for unmapped element types.
+
+        Returns the converter registered under ``FALLBACK_BLOCK`` ("paragraph")
+        if one exists, otherwise the ``fallback`` given to the constructor.
+        """
+        return self._converters.get(FALLBACK_BLOCK, self._fallback)
+
+
+def default_registry() -> MapperRegistry:
+    registry = MapperRegistry()
+    registry.register("heading", _heading_converter)
+    registry.register("paragraph", _paragraph_converter)
+    registry.register("image", _image_converter)
+    registry.register("quote", _quote_converter)
+    registry.register("code", _code_converter)
+    registry.register("table", _table_converter)
+    registry.register("list", _list_converter)
+    return registry
+
+
+class StreamFieldMapper:
+    """Converts a list of elements to StreamField (block_name, value) tuples."""
+
+    def __init__(self, registry: MapperRegistry | None = None) -> None:
+        self.registry = registry or default_registry()
+
+    def map_with_fallback(self, element_type: str, element: Element) -> tuple[str, Any]:
+        converter = self.registry.get(element_type) or self.registry.get_fallback()
+        return converter(element)
+
+    def map(self, elements: list[Element]) -> list[tuple[str, Any]]:
+        return [self.map_with_fallback(el.type, el) for el in elements]

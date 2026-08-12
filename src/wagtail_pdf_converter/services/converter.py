@@ -33,6 +33,31 @@ class DocumentLoggerAdapter(logging.LoggerAdapter):
 logger = DocumentLoggerAdapter(logging.getLogger(__name__), {"document_id": None})
 
 
+def dedup_chunk_boundary(accumulated: "list[Any]", new: "list[Any]") -> "list[Any]":
+    """
+    Remove overlap between the end of ``accumulated`` and the start of ``new``.
+
+    Chunks are converted with page overlap, so content from the shared page can
+    appear as elements at the end of one chunk and the start of the next. This
+    finds the largest trailing run of ``accumulated`` that exactly matches a
+    leading run of ``new`` (same type and content) and drops it from ``new``.
+
+    Only the immediate seam is considered: duplicates elsewhere are legitimate
+    content and are preserved. Returns the portion of ``new`` to append.
+    """
+    if not accumulated or not new:
+        return list(new)
+
+    # Largest k such that accumulated[-k:] == new[:k]. k can be at most the
+    # shorter of the two lengths.
+    max_k = min(len(accumulated), len(new))
+    overlap = 0
+    for k in range(1, max_k + 1):
+        if accumulated[-k:] == new[:k]:
+            overlap = k
+    return list(new[overlap:])
+
+
 class HybridPDFConverter:
     """
     A hybrid PDF converter that extracts images and converts content to markdown.
@@ -467,3 +492,68 @@ class HybridPDFConverter:
         )
 
         return markdown_content, metrics
+
+    def convert_pdf_to_elements(
+        self,
+        pdf_bytes: bytes,
+        collection_name: str,
+        document_id: int | None = None,
+        force_chunking: bool = False,
+        pages_per_chunk: int = 15,
+    ) -> "tuple[list[Any], dict[str, Any]]":
+        """
+        Orchestrate PDF -> typed element stream, mirroring convert_pdf_to_markdown.
+
+        Extracts and uploads images (producing the image report the backend uses
+        to reference stored Images by hash), then converts the PDF into typed
+        elements via the AI backend's schema-constrained structured output.
+        Falls back to a single paragraph element if the backend returns nothing.
+        """
+        from ..elements import ParagraphElement
+
+        logger = DocumentLoggerAdapter(logging.getLogger(__name__), {"document_id": document_id})
+
+        metrics: dict[str, Any] = {}
+        start_time = time.time()
+
+        try:
+            page_count = fitz.open(stream=pdf_bytes, filetype="pdf").page_count
+        except Exception:
+            page_count = 0
+
+        metrics.update({"pdf_size": humanize.naturalsize(len(pdf_bytes)), "total_pages": page_count})
+
+        # Extract images so the backend can reference them by content hash.
+        image_report, images_processed = self.image_processor.extract_and_upload_images(
+            pdf_bytes, collection_name, self.ai_client
+        )
+        metrics["images_processed"] = images_processed
+
+        chunk_threshold = conf_settings.CHUNK_PAGE_THRESHOLD
+        elements: list[Any] = []
+
+        if force_chunking or page_count > chunk_threshold:
+            metrics["processing_method"] = f"Chunked ({pages_per_chunk} pages/chunk)"
+            chunks = self.split_pdf_into_chunks(pdf_bytes, pages_per_chunk, overlap_pages=1)
+            for i, chunk_bytes in enumerate(chunks, 1):
+                try:
+                    chunk_elements = self.ai_client.convert_pdf_to_elements(chunk_bytes, image_report=image_report)
+                    # Drop elements duplicated from the overlap page shared with
+                    # the previous chunk before appending.
+                    elements.extend(dedup_chunk_boundary(elements, chunk_elements))
+                except Exception as e:
+                    logger.error("Failed to convert chunk %d to elements: %s", i, e)
+        else:
+            metrics["processing_method"] = "Single Pass"
+            elements = self.ai_client.convert_pdf_to_elements(pdf_bytes, image_report=image_report)
+
+        # Never produce an empty stream — fall back to a single paragraph.
+        if not elements:
+            logger.warning("Element conversion produced no elements; using fallback paragraph.")
+            elements = [ParagraphElement(type="paragraph", text="[No content extracted from PDF]")]
+
+        metrics["total_processing_time"] = f"{time.time() - start_time:.2f} seconds"
+        metrics["element_count"] = len(elements)
+        metrics["converted_at"] = timezone.now().isoformat()
+
+        return elements, metrics

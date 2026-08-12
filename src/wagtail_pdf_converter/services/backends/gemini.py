@@ -1,3 +1,4 @@
+import json
 import logging
 
 from http import HTTPStatus
@@ -16,12 +17,28 @@ from tenacity import (
 )
 
 from ...conf import settings as conf_settings
+from ...elements import Element
 from ...utils import get_mime_type_from_bytes
 from ..base import PDFConversionError
 from .base import AIPDFBackend
 
 
 logger = logging.getLogger(__name__)
+
+# Cap on how much of a malformed/unparseable response the fallback paragraph
+# carries verbatim. The full response is still in the warning log; this just
+# keeps a parse failure from dumping an unbounded blob into a page.
+FALLBACK_TEXT_MAX_CHARS = 2000
+
+# Transient failures worth retrying with backoff, per Gemini API guidance.
+# Shared between convert_content_with_retry and convert_pdf_to_elements so
+# both API call sites agree on what counts as retryable.
+RETRYABLE_GEMINI_EXCEPTIONS = (
+    google_exceptions.InternalServerError,
+    google_exceptions.ResourceExhausted,
+    google_exceptions.ServiceUnavailable,
+    google_genai_errors.ServerError,
+)
 
 
 class GeminiBackend(AIPDFBackend):
@@ -178,18 +195,23 @@ class GeminiBackend(AIPDFBackend):
         """
         return conf_settings.PROMPTS["PDF_CONVERSION_TEMPLATE"].format(image_report=image_report)
 
+    def _format_image_report_for_elements(self, image_report: list[dict[str, Any]]) -> str:
+        """Format the image report for element conversion, exposing the content hash."""
+        if not image_report:
+            return "No images were found in this document."
+
+        report_lines = ["EXTRACTED IMAGES (reference images by their HASH):"]
+        for img_info in image_report:
+            report_lines.append(f"- Page {img_info['page']}: {img_info['description']}")
+            report_lines.append(f"  HASH: {img_info.get('image_hash', '')}")
+            report_lines.append("")
+
+        return "\n".join(report_lines)
+
     @retry(
         wait=wait_exponential(multiplier=2, min=5, max=120),
         stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(
-            (
-                google_exceptions.InternalServerError,
-                google_exceptions.ResourceExhausted,
-                google_exceptions.ServiceUnavailable,
-                google_genai_errors.ServerError,
-                PDFConversionError,
-            )
-        ),
+        retry=retry_if_exception_type((*RETRYABLE_GEMINI_EXCEPTIONS, PDFConversionError)),
     )
     def convert_content_with_retry(self, contents: list[Any]) -> str:
         """Generic content conversion call with error handling and retries."""
@@ -214,12 +236,7 @@ class GeminiBackend(AIPDFBackend):
 
         except PDFConversionError as e:
             raise e
-        except (
-            google_exceptions.InternalServerError,
-            google_exceptions.ResourceExhausted,
-            google_exceptions.ServiceUnavailable,
-            google_genai_errors.ServerError,
-        ) as e:
+        except RETRYABLE_GEMINI_EXCEPTIONS as e:
             logger.warning(f"API call failed with {type(e).__name__}. Retrying...")
             raise e
         except google_genai_errors.ClientError as e:
@@ -302,3 +319,113 @@ class GeminiBackend(AIPDFBackend):
                 ),
             ]
         )
+
+    def parse_elements_response(self, raw_text: str) -> "list[Element]":
+        """
+        Parse and validate the AI's structured JSON output into typed elements.
+
+        Deterministic and network-free. On any parse/validation failure, or on
+        an empty result, returns a single fallback paragraph element carrying
+        the offending text so that content is never silently lost.
+        """
+        from pydantic import ValidationError
+
+        from ...elements import ParagraphElement, parse_elements
+
+        text = raw_text.strip()
+        # Strip a markdown code fence if the model wrapped the JSON in one.
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Drop the opening fence (```json / ```) and the closing fence.
+            lines = [line for line in lines if not line.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+
+        def _fallback() -> "list[Element]":
+            fallback_text = raw_text.strip() or "[Unparsed PDF content]"
+            if len(fallback_text) > FALLBACK_TEXT_MAX_CHARS:
+                fallback_text = fallback_text[:FALLBACK_TEXT_MAX_CHARS] + "… [truncated]"
+            return [ParagraphElement(type="paragraph", text=fallback_text)]
+
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Element conversion returned non-JSON output; using fallback paragraph.")
+            return _fallback()
+
+        raw_elements = data.get("elements") if isinstance(data, dict) else None
+        if raw_elements is None:
+            logger.warning("Element output missing 'elements' key; using fallback paragraph.")
+            return _fallback()
+
+        try:
+            elements = parse_elements(raw_elements)
+        except ValidationError:
+            logger.warning("Element output failed schema validation; using fallback paragraph.")
+            return _fallback()
+
+        if not elements:
+            logger.warning("Element output was empty; using fallback paragraph.")
+            return _fallback()
+
+        return elements
+
+    @retry(
+        wait=wait_exponential(multiplier=2, min=5, max=120),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type(RETRYABLE_GEMINI_EXCEPTIONS),
+    )
+    def convert_pdf_to_elements(
+        self, pdf_bytes: bytes, image_report: list[dict[str, Any]] | None = None
+    ) -> "list[Element]":
+        """
+        Convert a PDF into a typed element stream using schema-constrained
+        structured JSON output (response_json_schema).
+
+        Retries on the same transient errors as convert_content_with_retry.
+        Unlike that method, an empty/blocked response is not itself treated as
+        an error here: parse_elements_response already turns it into a
+        fallback paragraph, so content is never lost either way.
+
+        Args:
+            pdf_bytes: The source PDF.
+            image_report: Extracted-image report (from the image pipeline). When
+                provided, image hashes are exposed to the model so it can emit
+                ``image`` elements that reference stored Wagtail Images.
+        """
+        from ...elements import DocumentElements, custom_element_prompt_lines
+
+        base_prompt = conf_settings.PROMPTS["ELEMENT_CONVERSION_TEMPLATE"]
+
+        # Advertise any site-registered custom element types so the AI can emit them.
+        custom_lines = custom_element_prompt_lines()
+        if custom_lines:
+            base_prompt = (
+                base_prompt.rstrip()
+                + "\n\n**Additional element types available for this site:**\n"
+                + "\n".join(custom_lines)
+            )
+
+        image_section = self._format_image_report_for_elements(image_report or [])
+        prompt = f"{base_prompt}\n\n{image_section}"
+        contents: list[Any] = [
+            prompt,
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        ]
+        try:
+            response = self.client.models.generate_content(
+                model=self.conversion_model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=DocumentElements.response_json_schema(),
+                ),
+            )
+        except google_genai_errors.ClientError as e:
+            # Same 429-as-ResourceExhausted normalization as
+            # convert_content_with_retry: some 429s surface as ClientError
+            # rather than the dedicated ResourceExhausted type.
+            if e.code == HTTPStatus.TOO_MANY_REQUESTS:
+                logger.warning("Rate limit hit (429) during element conversion. Retrying...")
+                raise google_exceptions.ResourceExhausted("Rate limit exceeded (429)") from e
+            raise
+        return self.parse_elements_response(response.text or "")

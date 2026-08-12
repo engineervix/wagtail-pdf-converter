@@ -19,6 +19,7 @@ DEFAULTS = {
         "IMAGE_BATCH_DESCRIPTION": prompts.DEFAULT_IMAGE_BATCH_DESCRIPTION_PROMPT,
         "PDF_CONVERSION_TEMPLATE": prompts.DEFAULT_PDF_CONVERSION_PROMPT_TEMPLATE,
         "MARKDOWN_CONTINUATION": prompts.DEFAULT_MARKDOWN_CONTINUATION_PROMPT,
+        "ELEMENT_CONVERSION_TEMPLATE": prompts.DEFAULT_ELEMENT_CONVERSION_PROMPT_TEMPLATE,
     },
     "CONVERSATIONAL_PHRASES": prompts.DEFAULT_CONVERSATIONAL_PHRASES,
     "ENABLE_ADMIN_EXTENSIONS": False,
@@ -27,6 +28,13 @@ DEFAULTS = {
     # Set to ConversionStatusDisplay.INDEX_VIEW or EDIT_VIEW to restrict to one.
     "CONVERSION_STATUS_DISPLAY": None,
     "FILTER_PDF_IMAGES": True,
+    # Opt-in: enable the "Create page from PDF" admin action. Requires a target
+    # page model and parent page to be configured (below) or passed at call time.
+    "ENABLE_PAGE_CREATION": False,
+    # Dotted path to the Page model used when creating pages from PDFs.
+    "PAGE_CREATION_MODEL": None,
+    # Primary key of the parent page under which new pages are created.
+    "PAGE_CREATION_PARENT_ID": None,
     "DOCUMENT_CONVERSION_QUERY_HELPER": "wagtail_pdf_converter.utils.DocumentConversionQueryHelper",
     "AI_BACKENDS": {
         "default": {
@@ -41,7 +49,7 @@ DEFAULTS = {
 }
 
 
-IMPORT_STRINGS: list[str] = ["DOCUMENT_CONVERSION_QUERY_HELPER"]
+IMPORT_STRINGS: list[str] = ["DOCUMENT_CONVERSION_QUERY_HELPER", "PAGE_CREATION_MODEL"]
 
 
 def perform_import(val, setting_name):
@@ -129,6 +137,11 @@ class PDFConverterSettings:
 
 
 settings = PDFConverterSettings(None, DEFAULTS, IMPORT_STRINGS)
+
+
+def page_creation_configured() -> bool:
+    """Whether page creation is enabled and has a model and parent page configured."""
+    return bool(settings.ENABLE_PAGE_CREATION and settings.PAGE_CREATION_MODEL and settings.PAGE_CREATION_PARENT_ID)
 
 
 def reload_settings(*args, **kwargs):

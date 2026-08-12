@@ -1,0 +1,5 @@
+{% load wagtailcore_tags %}
+<blockquote class="pdf-page-quote">
+    <p>{{ value.text }}</p>
+    {% if value.attribution %}<footer class="pdf-page-quote-attribution">{{ value.attribution }}</footer>{% endif %}
+</blockquote>

@@ -6,6 +6,8 @@ icon: lucide/file-text
 
 `wagtail-pdf-converter` converts PDF documents to accessible HTML using AI. Upload a PDF via the Wagtail admin and the package produces a Markdown representation rendered as semantic HTML — an accessible alternative to sending users a binary file to download.
 
+For content that deserves the full editing workflow — blocks, revisions, moderation — you can optionally turn a PDF into a real Wagtail Page instead. See [Creating pages from PDFs](guides/creating-pages.md).
+
 ## When to use it
 
 - You need to meet accessibility requirements (WCAG, public sector body regulations) for documents on your site
