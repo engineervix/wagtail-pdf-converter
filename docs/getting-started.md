@@ -9,8 +9,10 @@ Install the package, wire it up, and get your first PDF converting in about 10 m
 ## 1. Install the package
 
 ```bash
-python -m pip install wagtail-pdf-converter
+python -m pip install "wagtail-pdf-converter[db-backend]"
 ```
+
+The `db-backend` extra pulls in [`django-tasks-db`](https://github.com/RealOrangeOne/django-tasks-db), which this guide uses for the `pdf_conversion` task backend in step 7. It's optional — skip it if you're supplying your own django-tasks backend.
 
 ## 2. Add to INSTALLED_APPS
 
@@ -23,7 +25,7 @@ INSTALLED_APPS = [
     "wagtail.documents",
     # ...
     "django_tasks",
-    "django_tasks.backends.database",  # Registers the DBTaskResult model
+    "django_tasks_db",  # Registers the DBTaskResult model
     "wagtailmarkdown",
 ]
 ```
@@ -138,7 +140,7 @@ TASKS = {
         "BACKEND": "django_tasks.backends.immediate.ImmediateBackend",
     },
     "pdf_conversion": {
-        "BACKEND": "django_tasks.backends.database.DatabaseBackend",
+        "BACKEND": "django_tasks_db.DatabaseBackend",  # Requires the db-backend extra
     },
 }
 ```
@@ -146,7 +148,7 @@ TASKS = {
 Then run the worker:
 
 ```bash
-python manage.py db_worker --queue-name pdf_conversion
+python manage.py db_worker --backend pdf_conversion
 ```
 
 In production, run the worker as a persistent process — systemd, a Procfile, or your platform's equivalent.
@@ -157,6 +159,9 @@ In production, run the worker as a persistent process — systemd, a Procfile, o
 2. Open the document and save it again — this triggers the conversion signal.
 3. Watch the status move from **Pending** → **Processing** → **Completed**.
 4. Visit `/documents/<id>/html/` to see the HTML version, or call `document.get_html_url()` in code.
+
+!!! tip "Stuck on Pending?"
+    The `pdf_conversion` queue only moves once a worker is consuming it. Make sure `db_worker --backend pdf_conversion` from step 7 is still running.
 
 !!! note "Conversion time"
     Large PDFs with many pages or images can take several minutes. PDFs over 50 pages are split into chunks and processed in parallel.
