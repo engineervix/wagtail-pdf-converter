@@ -19,6 +19,8 @@ The conversion runs through four stages:
 
 Anything the AI emits that has no matching block is routed to a plain paragraph block, so **no content is ever silently dropped** — Wagtail's StreamField otherwise discards unrecognised block types without an error. Misclassified blocks stay editable in the page editor, so you can correct them by hand.
 
+Before the AI call, the PDF is checked for encrypted, corrupt, or zero-page files and rejected with a specific error message naming the problem.
+
 ## 1. Enable it
 
 ```python
