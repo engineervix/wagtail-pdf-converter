@@ -16,6 +16,7 @@ from django.utils import timezone
 from wagtail_pdf_converter.conf import settings as conf_settings
 
 from .backends import get_ai_backend
+from .base import PDFConversionError
 from .image_processing import ImageProcessor
 
 
@@ -31,6 +32,24 @@ class DocumentLoggerAdapter(logging.LoggerAdapter):
 
 
 logger = DocumentLoggerAdapter(logging.getLogger(__name__), {"document_id": None})
+
+
+def validate_pdf(pdf_bytes: bytes) -> int:
+    """
+    Open ``pdf_bytes`` with fitz and reject inputs the AI backend could never
+    convert (not a PDF, password-protected, zero pages), before the expensive
+    part of the pipeline runs. Returns the page count on success.
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise PDFConversionError("This file could not be opened as a PDF.") from e
+
+    if doc.needs_pass:
+        raise PDFConversionError("This PDF is password-protected and cannot be converted.")
+    if doc.page_count == 0:
+        raise PDFConversionError("This PDF has no pages.")
+    return doc.page_count
 
 
 def dedup_chunk_boundary(accumulated: "list[Any]", new: "list[Any]") -> "list[Any]":
@@ -412,10 +431,7 @@ class HybridPDFConverter:
         metrics: dict[str, Any] = {}
         start_time = time.time()
 
-        try:
-            page_count = fitz.open(stream=pdf_bytes, filetype="pdf").page_count
-        except Exception:
-            page_count = 0
+        page_count = validate_pdf(pdf_bytes)
 
         metrics.update(
             {
@@ -516,10 +532,7 @@ class HybridPDFConverter:
         metrics: dict[str, Any] = {}
         start_time = time.time()
 
-        try:
-            page_count = fitz.open(stream=pdf_bytes, filetype="pdf").page_count
-        except Exception:
-            page_count = 0
+        page_count = validate_pdf(pdf_bytes)
 
         metrics.update({"pdf_size": humanize.naturalsize(len(pdf_bytes)), "total_pages": page_count})
 

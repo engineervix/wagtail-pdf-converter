@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING
 
+import fitz
 import pytest
 
 from django.contrib.auth import get_user_model
@@ -16,6 +17,17 @@ User = get_user_model()
 @pytest.fixture(autouse=True)
 def temporary_media_dir(settings, tmp_path: pytest.TempdirFactory):
     settings.MEDIA_ROOT = tmp_path / "media"
+
+
+def make_valid_pdf_bytes() -> bytes:
+    doc = fitz.open()
+    doc.new_page()
+    return doc.tobytes()
+
+
+@pytest.fixture
+def valid_pdf_bytes() -> bytes:
+    return make_valid_pdf_bytes()
 
 
 @pytest.fixture

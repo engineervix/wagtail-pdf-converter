@@ -12,6 +12,8 @@ All notable changes to this project will be documented here.
 
 ### Features
 
+- PDF conversion now validates the file before the AI call and fails fast with a specific message (not a valid PDF, password-protected, or no pages) instead of a raw exception. Applies to both the Markdown and page-creation paths.
+
 #### Create Wagtail pages from PDFs
 
 - New opt-in capability to turn a converted PDF into a real Wagtail Page with a StreamField body and the full editor workflow, alongside the existing Markdown-to-HTML output.

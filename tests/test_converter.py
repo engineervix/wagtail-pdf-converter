@@ -7,6 +7,7 @@ from google.api_core import exceptions as google_exceptions
 from google.genai import errors as google_genai_errors
 from tenacity import RetryError, stop_after_attempt, wait_none
 
+from tests.conftest import make_valid_pdf_bytes
 from wagtail_pdf_converter import services
 from wagtail_pdf_converter.services import backends, image_processing
 
@@ -210,6 +211,7 @@ class TestPDFChunking(SimpleTestCase):
         # Mock document for both converter and image processing
         mock_doc = mock.MagicMock()
         mock_doc.page_count = 20
+        mock_doc.needs_pass = False
         mock_doc.__len__.return_value = 20
         mock_doc.__iter__ = mock.Mock(return_value=iter([]))
 
@@ -256,6 +258,7 @@ class TestPDFChunking(SimpleTestCase):
         """Test that when a chunk conversion fails, error message is inserted and processing continues."""
         mock_doc = mock.MagicMock()
         mock_doc.page_count = 30
+        mock_doc.needs_pass = False
         mock_doc.__len__.return_value = 30
         mock_doc.__iter__ = mock.Mock(return_value=iter([]))
 
@@ -414,7 +417,7 @@ class TestPDFConverter(SimpleTestCase):
         mock_client.return_value.models.generate_content = mock_generate_content
 
         converter = services.HybridPDFConverter()
-        pdf_bytes = b"test pdf content"
+        pdf_bytes = make_valid_pdf_bytes()
         markdown_content, metrics = converter.convert_pdf_to_markdown(pdf_bytes, "test-collection")
 
         self.assertEqual(markdown_content, "## Test Markdown")
@@ -445,7 +448,7 @@ class TestPDFConverter(SimpleTestCase):
         mock_client.return_value.models.generate_content = mock_generate_content
 
         converter = services.HybridPDFConverter()
-        pdf_bytes = b"test pdf content"
+        pdf_bytes = make_valid_pdf_bytes()
 
         with self.assertRaises(RetryError):
             converter.convert_pdf_to_markdown(pdf_bytes, "test-collection")
@@ -478,7 +481,7 @@ class TestPDFConverter(SimpleTestCase):
         mock_client.return_value.models.generate_content = mock_generate_content
 
         converter = services.HybridPDFConverter()
-        pdf_bytes = b"test pdf content"
+        pdf_bytes = make_valid_pdf_bytes()
 
         with self.assertRaises(RetryError):
             converter.convert_pdf_to_markdown(pdf_bytes, "test-collection")

@@ -9,7 +9,7 @@ def P(text):
 
 
 class TestChunkedElementDedup:
-    def test_chunked_conversion_dedups_seam(self):
+    def test_chunked_conversion_dedups_seam(self, valid_pdf_bytes):
         # Two chunks share an overlap element "shared" at the seam.
         backend = MagicMock()
         backend.convert_pdf_to_elements.side_effect = [
@@ -28,7 +28,7 @@ class TestChunkedElementDedup:
             converter.split_pdf_into_chunks = MagicMock(return_value=[b"chunk1", b"chunk2"])
 
             elements, _ = converter.convert_pdf_to_elements(
-                pdf_bytes=b"%PDF-1.4 fake",
+                pdf_bytes=valid_pdf_bytes,
                 collection_name="Extracted Images",
                 force_chunking=True,
             )
@@ -36,7 +36,7 @@ class TestChunkedElementDedup:
         texts = [e.text for e in elements]
         assert texts == ["page1", "shared", "page2"]
 
-    def test_chunked_conversion_preserves_non_seam_duplicates(self):
+    def test_chunked_conversion_preserves_non_seam_duplicates(self, valid_pdf_bytes):
         # "ref" appears in both chunks but NOT at the seam -> must be preserved.
         backend = MagicMock()
         backend.convert_pdf_to_elements.side_effect = [
@@ -54,7 +54,7 @@ class TestChunkedElementDedup:
             converter.split_pdf_into_chunks = MagicMock(return_value=[b"chunk1", b"chunk2"])
 
             elements, _ = converter.convert_pdf_to_elements(
-                pdf_bytes=b"%PDF-1.4 fake",
+                pdf_bytes=valid_pdf_bytes,
                 collection_name="Extracted Images",
                 force_chunking=True,
             )
