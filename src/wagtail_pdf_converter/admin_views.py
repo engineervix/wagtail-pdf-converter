@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any
 import django_filters
 
 from django.contrib import messages
+from django.core.exceptions import PermissionDenied
 from django.db.models import Avg, FloatField
 from django.db.models.functions import Cast
 from django.shortcuts import get_object_or_404, redirect, render
@@ -18,7 +19,9 @@ from wagtail.documents.views.documents import (
 )
 from wagtail.documents.views.documents import IndexView as WagtailDocsIndexView
 from wagtail.images.views.images import IndexView as WagtailImagesIndexView
+from wagtail.models import Page
 
+from wagtail_pdf_converter.conf import page_creation_configured
 from wagtail_pdf_converter.conf import settings as pdf_settings
 from wagtail_pdf_converter.constants import ConversionStatusDisplay
 from wagtail_pdf_converter.enums import ConversionStatus
@@ -105,6 +108,8 @@ class ConversionStatusColumn(Column):
         context["started_at"] = value["started_at"]
         context["view_url"] = reverse("wagtail_pdf_converter_document_html", args=(value["id"],))
         context["retry_url"] = reverse("wagtail_pdf_converter:retry_conversion", args=(value["id"],))
+        context["show_create_page"] = page_creation_configured()
+        context["create_page_url"] = reverse("wagtail_pdf_converter:create_page", args=(value["id"],))
         return context
 
 
@@ -216,3 +221,78 @@ def retry_conversion(request: "HttpRequest", document_id: int) -> Any:
 
     messages.success(request, _("Conversion retry initiated."))
     return redirect("wagtaildocs:index")
+
+
+def _build_converter():
+    """Build the PDF converter. Module-level seam so tests can inject a stub."""
+    from wagtail_pdf_converter.services.converter import HybridPDFConverter
+
+    return HybridPDFConverter()
+
+
+@require_admin_access
+def create_page_from_document(request: "HttpRequest", document_id: int) -> Any:
+    """
+    Create a Wagtail Page from a PDF document's content (opt-in feature).
+
+    GET renders a confirmation page; the page is only created on POST so the
+    state-changing action is CSRF-protected and never triggered by a bare link.
+    """
+    document = get_object_or_404(Document, id=document_id)
+
+    if not getattr(document, "is_pdf", False):
+        messages.error(request, _("Page creation is only available for PDF documents."))
+        return redirect("wagtaildocs:index")
+
+    if not pdf_settings.ENABLE_PAGE_CREATION:
+        messages.error(request, _("PDF-to-page creation is not enabled."))
+        return redirect("wagtaildocs:index")
+
+    page_model = pdf_settings.PAGE_CREATION_MODEL
+    parent_id = pdf_settings.PAGE_CREATION_PARENT_ID
+    if not page_model or not parent_id:
+        messages.error(
+            request,
+            _("PDF page creation requires PAGE_CREATION_MODEL and PAGE_CREATION_PARENT_ID to be configured."),
+        )
+        return redirect("wagtaildocs:index")
+
+    try:
+        parent = Page.objects.get(pk=parent_id)
+    except Page.DoesNotExist:
+        messages.error(request, _("Configured parent page (id=%(id)s) does not exist.") % {"id": parent_id})
+        return redirect("wagtaildocs:index")
+
+    # Admin access alone isn't enough: the user also needs page-tree
+    # permission to add a page under the configured parent, same as
+    # Wagtail's own page-create view (wagtail.admin.views.pages.create).
+    if not parent.permissions_for_user(request.user).can_add_subpage():
+        raise PermissionDenied
+
+    if request.method == "GET":
+        return render(
+            request,
+            "wagtail_pdf_converter/admin/confirm_create_page.html",
+            {
+                "document": document,
+                "parent_page": parent,
+                "page_model_name": page_model.__name__ if hasattr(page_model, "__name__") else str(page_model),
+            },
+        )
+
+    from wagtail_pdf_converter.services.page_creator import convert_pdf_to_page
+
+    try:
+        page = convert_pdf_to_page(
+            document,
+            parent=parent,
+            page_model=page_model,
+            user=request.user,
+            converter=_build_converter(),
+        )
+    except Exception as e:
+        messages.error(request, _("Failed to create page: %(error)s") % {"error": e})
+        return redirect("wagtaildocs:index")
+
+    messages.success(request, _("Page '%(title)s' created.") % {"title": page.title})
+    return redirect("wagtailadmin_pages:edit", page.id)

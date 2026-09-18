@@ -1,4 +1,5 @@
 import concurrent.futures
+import hashlib
 import logging
 
 from io import BytesIO
@@ -385,13 +386,38 @@ class ImageProcessor:
 
         return image_groups
 
+    def _convert_to_png(self, image_bytes: bytes) -> bytes | None:
+        """
+        Decode image_bytes with Pillow and re-encode as PNG.
+
+        Willow (Wagtail's image backend) only recognises a fixed set of
+        formats and does not include JPEG2000, even though Pillow can decode
+        it. This gives a failed upload a second try in a format Willow does
+        support. Returns None if Pillow cannot decode the bytes either.
+        """
+        try:
+            with Image.open(BytesIO(image_bytes)) as img:
+                output = BytesIO()
+                img.convert("RGB").save(output, format="PNG")
+                return output.getvalue()
+        except Exception:
+            return None
+
     def process_image_batch(
         self,
         image_batch: list[dict[str, Any]],
         collection_name: str,
         ai_client: "AIPDFBackend",
     ) -> list[dict[str, Any]]:
-        """Process a batch of images: describe them and upload to Wagtail."""
+        """
+        Describe a batch of images and upload each one to Wagtail.
+
+        Returns one report entry per non-decorative image, in the same order
+        they were described. An image that fails to upload gets one retry as
+        a converted PNG (see ``_convert_to_png``). If that also fails, the
+        entry still gets added with ``url`` set to ``None``, so the AI can
+        still reference it and downstream code can still account for it.
+        """
         if not image_batch:
             return []
 
@@ -403,9 +429,8 @@ class ImageProcessor:
         # Upload each image with its description
         results = []
         for img_data, description in zip(image_batch, descriptions, strict=True):
+            image_name = f"page_{img_data['page_num']}_img_{img_data['img_index']}.{img_data['format']}"
             try:
-                image_name = f"page_{img_data['page_num']}_img_{img_data['img_index']}.{img_data['format']}"
-
                 # Skip decorative images
                 if description.upper() == "DECORATIVE":
                     logger.info(f"  - Skipping decorative image: {image_name}")
@@ -420,12 +445,16 @@ class ImageProcessor:
                     description=description,  # Use AI-generated description
                 )
 
-                # Add to results
+                # Add to results. The content hash matches the Image.file_hash
+                # assigned by add_image_to_wagtail_collection, and is the stable
+                # identity used to link an AI-emitted image element back to the
+                # stored Image when building StreamField pages.
                 result = {
                     "page": img_data["page_num"],
                     "image_name": image_name,
                     "description": description,
                     "url": image_url,
+                    "image_hash": hashlib.sha1(img_data["bytes"], usedforsecurity=False).hexdigest(),
                 }
                 results.append(result)
 
@@ -438,6 +467,46 @@ class ImageProcessor:
             except Exception as e:
                 logger.error(f"  ✗ Failed to upload image on page {img_data['page_num']}: {e}")
 
+                # Retry once with the image converted to PNG, in case the
+                # original upload failed because Willow does not recognise
+                # the format (see _convert_to_png).
+                png_bytes = self._convert_to_png(img_data["bytes"])
+                retry_url: str | None = None
+                stored_name = image_name
+                stored_bytes = img_data["bytes"]
+                if png_bytes is not None:
+                    retry_name = f"{image_name.rsplit('.', 1)[0]}.png"
+                    try:
+                        retry_url = add_image_to_wagtail_collection(
+                            image_data=png_bytes,
+                            image_name=retry_name,
+                            collection_name=collection_name,
+                            title=retry_name,
+                            description=description,
+                        )
+                        stored_name = retry_name
+                        stored_bytes = png_bytes
+                        logger.info(f"  Converted to PNG and uploaded: {retry_name}")
+                    except Exception as retry_error:
+                        logger.error(
+                            f"  ✗ Upload of the converted PNG also failed for page {img_data['page_num']}: {retry_error}"
+                        )
+
+                # Report it either way. A successful retry becomes a real
+                # image. One that still failed gets url=None so the AI can
+                # still reference it and the page-creation fallback can turn
+                # it into a paragraph, instead of the image vanishing with no
+                # trace.
+                results.append(
+                    {
+                        "page": img_data["page_num"],
+                        "image_name": stored_name,
+                        "description": description,
+                        "url": retry_url,
+                        "image_hash": hashlib.sha1(stored_bytes, usedforsecurity=False).hexdigest(),
+                    }
+                )
+
         return results
 
     def extract_and_upload_images(
@@ -446,10 +515,14 @@ class ImageProcessor:
         """
         Extracts images using pyMuPDF (fitz), uploads them with AI-generated descriptions, and creates an image report.
         Includes detection and merging of split images.
-        Returns the original PDF bytes unchanged, along with an image report.
 
         Uses PyMuPDF's image extraction capabilities to find and process embedded images.
         Applies filtering to skip decorative or low-quality images before processing.
+
+        Returns the image report and a count of images actually uploaded. The
+        report can also hold an entry for an image that failed to upload
+        (``url`` is ``None`` there), so that count can be lower than the
+        report's length.
 
         References:
         - PyMuPDF docs: "How to Extract Images: PDF Documents"
@@ -554,7 +627,10 @@ class ImageProcessor:
                 try:
                     batch_results = future.result()
                     image_report.extend(batch_results)
-                    images_processed_count += len(batch_results)
+                    # Count only entries with a url: a failed upload is still
+                    # reported (see the except block in process_image_batch),
+                    # but it is not a processed image.
+                    images_processed_count += sum(1 for r in batch_results if r.get("url"))
                     logger.info(f"  ✓ Completed processing a batch of {len(batch_results)} images")
 
                 except Exception as e:

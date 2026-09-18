@@ -10,6 +10,9 @@
     {% elif status == 'completed' %}
         <a href="{{ view_url }}" target="_blank" class="button button-small button-secondary" title="View accessible version">View</a>
         <span><a href="{{ retry_url }}" class="button button-small button-secondary button--icon">{% icon name="rotate" %} Retry</a></span>
+        {% if show_create_page %}
+            <span><a href="{{ create_page_url }}" class="button button-small button-secondary button--icon">{% icon name="doc-full" %} Create page</a></span>
+        {% endif %}
     {% elif status == 'exempt' %}
         <span class="status-tag primary">Exempt</span>
     {% elif status == 'not_applicable' %}

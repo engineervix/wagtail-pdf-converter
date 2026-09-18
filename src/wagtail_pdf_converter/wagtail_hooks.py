@@ -32,6 +32,11 @@ def register_admin_urls() -> list[Any]:
             name="retry_conversion",
         ),
         path(
+            "documents/<int:document_id>/create-page/",
+            admin_views.create_page_from_document,
+            name="create_page",
+        ),
+        path(
             "conversion-metrics/",
             admin_views.ConversionMetricsView.as_view(),
             name="conversion-metrics",

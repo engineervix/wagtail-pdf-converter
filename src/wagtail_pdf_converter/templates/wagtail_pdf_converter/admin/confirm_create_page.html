@@ -1,0 +1,26 @@
+{% extends "wagtailadmin/base.html" %}
+{% load i18n %}
+
+{% block titletag %}{% blocktrans with title=document.title %}Create page from {{ title }}{% endblocktrans %}{% endblock %}
+
+{% block content %}
+    {% trans "Create page from PDF" as title_text %}
+    {% include "wagtailadmin/shared/header.html" with title=title_text icon="doc-full" %}
+
+    <div class="nice-padding">
+        <p>
+            {% blocktrans with title=document.title parent=parent_page.title model=page_model_name %}
+            This will create a new <strong>{{ model }}</strong> page titled
+            "<strong>{{ title }}</strong>" under <strong>{{ parent }}</strong>,
+            built from the PDF's content as StreamField blocks.
+            {% endblocktrans %}
+        </p>
+        <p>{% trans "You can review and edit the page before publishing it." %}</p>
+
+        <form action="{% url 'wagtail_pdf_converter:create_page' document.id %}" method="POST">
+            {% csrf_token %}
+            <button type="submit" class="button">{% trans "Create page" %}</button>
+            <a href="{% url 'wagtaildocs:index' %}" class="button button-secondary">{% trans "Cancel" %}</a>
+        </form>
+    </div>
+{% endblock %}

@@ -22,6 +22,10 @@ Once a conversion completes, an **Edit Accessible Version** button appears on th
 
 This view loads separately from the main document edit page, so the large Markdown payload isn't loaded into memory on every document edit.
 
+### Create page from PDF
+
+When [page creation](creating-pages.md) is enabled, a **Create page** button appears on the document edit page. It opens a confirmation screen; confirming creates a new Page from the PDF's content and opens it in the editor. With the enhanced Document listing (below) also enabled, the button appears in the listing's status column for converted PDFs too.
+
 ### Conversion status on the edit page
 
 For PDF documents, a read-only **Conversion status** field is shown on the document edit page above the action buttons. This is controlled by `CONVERSION_STATUS_DISPLAY` — see [Controlling where status is shown](#controlling-where-status-is-shown) below.

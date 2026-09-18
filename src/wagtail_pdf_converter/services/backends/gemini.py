@@ -1,3 +1,4 @@
+import json
 import logging
 
 from http import HTTPStatus
@@ -16,12 +17,28 @@ from tenacity import (
 )
 
 from ...conf import settings as conf_settings
+from ...elements import Element
 from ...utils import get_mime_type_from_bytes
 from ..base import PDFConversionError
 from .base import AIPDFBackend
 
 
 logger = logging.getLogger(__name__)
+
+# Cap on how much of a malformed/unparseable response the fallback paragraph
+# carries verbatim. The full response is still in the warning log; this just
+# keeps a parse failure from dumping an unbounded blob into a page.
+FALLBACK_TEXT_MAX_CHARS = 2000
+
+# Transient failures worth retrying with backoff, per Gemini API guidance.
+# Shared between convert_content_with_retry and convert_pdf_to_elements so
+# both API call sites agree on what counts as retryable.
+RETRYABLE_GEMINI_EXCEPTIONS = (
+    google_exceptions.InternalServerError,
+    google_exceptions.ResourceExhausted,
+    google_exceptions.ServiceUnavailable,
+    google_genai_errors.ServerError,
+)
 
 
 class GeminiBackend(AIPDFBackend):
@@ -160,12 +177,17 @@ class GeminiBackend(AIPDFBackend):
             return f"Image from page {page_num}"
 
     def _format_image_report(self, image_report: list[dict[str, Any]]) -> str:
-        """Format the image report as a readable string for the prompt."""
-        if not image_report:
+        """Format the image report as a readable string for the prompt.
+
+        Skips an entry with no url. That means the image failed to upload, so
+        there is no URL to put in the Markdown output.
+        """
+        uploaded = [img for img in image_report if img.get("url")]
+        if not uploaded:
             return "No images were found in this document."
 
         report_lines = ["EXTRACTED IMAGES:"]
-        for img_info in image_report:
+        for img_info in uploaded:
             report_lines.append(f"- Page {img_info['page']}: {img_info['description']}")
             report_lines.append(f"  URL: {img_info['url']}")
             report_lines.append("")
@@ -178,18 +200,64 @@ class GeminiBackend(AIPDFBackend):
         """
         return conf_settings.PROMPTS["PDF_CONVERSION_TEMPLATE"].format(image_report=image_report)
 
+    def _format_image_report_for_elements(self, image_report: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
+        """
+        Format the image report for element conversion and build the index map.
+
+        A 40-character SHA-1 hash is hard for the model to copy back
+        exactly, and the risk grows with how many hashes are in one prompt.
+        The model is given a short, sequential index for each image instead,
+        and asked to reference images by that. Returns the prompt text and a
+        map from each index string to its real content hash. Pass that map to
+        _resolve_image_indexes once the model has responded, to translate its
+        answer back to the real hash.
+        """
+        if not image_report:
+            return "No images were found in this document.", {}
+
+        report_lines = ["EXTRACTED IMAGES (reference each image by its INDEX number):"]
+        index_to_hash: dict[str, str] = {}
+        for position, img_info in enumerate(image_report, start=1):
+            index = str(position)
+            report_lines.append(f"- Page {img_info['page']}: {img_info['description']}")
+            report_lines.append(f"  INDEX: {index}")
+            report_lines.append("")
+            index_to_hash[index] = img_info.get("image_hash", "")
+
+        return "\n".join(report_lines), index_to_hash
+
+    def _resolve_image_indexes(self, elements: "list[Any]", index_to_hash: dict[str, str]) -> "list[Any]":
+        """
+        Replace an image element's index reference with its real content hash.
+
+        The model was asked to reference images by index (see
+        _format_image_report_for_elements). An index it got wrong, or a real
+        hash it wrote anyway, is left untouched. Neither will resolve to a
+        stored Image. The existing paragraph fallback in
+        create_page_from_elements already covers that case.
+
+        Matches on a plain "type" and "image_hash" attribute, not
+        ImageElement specifically. A project can register its own model
+        under the "image" type (see register_element_type in elements.py).
+        Builds a new list rather than mutating elements in place, since a
+        custom registered model is allowed to be immutable.
+        """
+        resolved: list[Any] = []
+        for element in elements:
+            image_hash = getattr(element, "image_hash", None)
+            if (
+                getattr(element, "type", None) == "image"
+                and isinstance(image_hash, str)
+                and image_hash in index_to_hash
+            ):
+                element = element.model_copy(update={"image_hash": index_to_hash[image_hash]})
+            resolved.append(element)
+        return resolved
+
     @retry(
         wait=wait_exponential(multiplier=2, min=5, max=120),
         stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(
-            (
-                google_exceptions.InternalServerError,
-                google_exceptions.ResourceExhausted,
-                google_exceptions.ServiceUnavailable,
-                google_genai_errors.ServerError,
-                PDFConversionError,
-            )
-        ),
+        retry=retry_if_exception_type((*RETRYABLE_GEMINI_EXCEPTIONS, PDFConversionError)),
     )
     def convert_content_with_retry(self, contents: list[Any]) -> str:
         """Generic content conversion call with error handling and retries."""
@@ -214,12 +282,7 @@ class GeminiBackend(AIPDFBackend):
 
         except PDFConversionError as e:
             raise e
-        except (
-            google_exceptions.InternalServerError,
-            google_exceptions.ResourceExhausted,
-            google_exceptions.ServiceUnavailable,
-            google_genai_errors.ServerError,
-        ) as e:
+        except RETRYABLE_GEMINI_EXCEPTIONS as e:
             logger.warning(f"API call failed with {type(e).__name__}. Retrying...")
             raise e
         except google_genai_errors.ClientError as e:
@@ -302,3 +365,117 @@ class GeminiBackend(AIPDFBackend):
                 ),
             ]
         )
+
+    def parse_elements_response(self, raw_text: str) -> "list[Element]":
+        """
+        Parse and validate the AI's structured JSON output into typed elements.
+
+        Deterministic and network-free. On any parse/validation failure, or on
+        an empty result, returns a single fallback paragraph element carrying
+        the offending text so that content is never silently lost.
+        """
+        from pydantic import ValidationError
+
+        from ...elements import ParagraphElement, parse_elements
+
+        text = raw_text.strip()
+        # Strip a markdown code fence if the model wrapped the JSON in one.
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Drop the opening fence (```json / ```) and the closing fence.
+            lines = [line for line in lines if not line.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+
+        def _fallback() -> "list[Element]":
+            fallback_text = raw_text.strip() or "[Unparsed PDF content]"
+            if len(fallback_text) > FALLBACK_TEXT_MAX_CHARS:
+                fallback_text = fallback_text[:FALLBACK_TEXT_MAX_CHARS] + "… [truncated]"
+            return [ParagraphElement(type="paragraph", text=fallback_text)]
+
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Element conversion returned non-JSON output; using fallback paragraph.")
+            return _fallback()
+
+        raw_elements = data.get("elements") if isinstance(data, dict) else None
+        if raw_elements is None:
+            logger.warning("Element output missing 'elements' key; using fallback paragraph.")
+            return _fallback()
+
+        try:
+            elements = parse_elements(raw_elements)
+        except ValidationError:
+            logger.warning("Element output failed schema validation; using fallback paragraph.")
+            return _fallback()
+
+        if not elements:
+            logger.warning("Element output was empty; using fallback paragraph.")
+            return _fallback()
+
+        return elements
+
+    @retry(
+        wait=wait_exponential(multiplier=2, min=5, max=120),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type(RETRYABLE_GEMINI_EXCEPTIONS),
+    )
+    def convert_pdf_to_elements(
+        self, pdf_bytes: bytes, image_report: list[dict[str, Any]] | None = None
+    ) -> "list[Element]":
+        """
+        Convert a PDF into a typed element stream using schema-constrained
+        structured JSON output (response_json_schema).
+
+        Retries on the same transient errors as convert_content_with_retry.
+        Unlike that method, an empty/blocked response is not itself treated as
+        an error here: parse_elements_response already turns it into a
+        fallback paragraph, so content is never lost either way.
+
+        Args:
+            pdf_bytes: The source PDF.
+            image_report: Extracted-image report (from the image pipeline). When
+                provided, each image gets a short index in the prompt (see
+                _format_image_report_for_elements) so the model can emit
+                ``image`` elements that reference stored Wagtail Images. The
+                index is resolved back to the real content hash before the
+                elements are returned.
+        """
+        from ...elements import DocumentElements, custom_element_prompt_lines
+
+        base_prompt = conf_settings.PROMPTS["ELEMENT_CONVERSION_TEMPLATE"]
+
+        # Advertise any site-registered custom element types so the AI can emit them.
+        custom_lines = custom_element_prompt_lines()
+        if custom_lines:
+            base_prompt = (
+                base_prompt.rstrip()
+                + "\n\n**Additional element types available for this site:**\n"
+                + "\n".join(custom_lines)
+            )
+
+        image_section, index_to_hash = self._format_image_report_for_elements(image_report or [])
+        prompt = f"{base_prompt}\n\n{image_section}"
+        contents: list[Any] = [
+            prompt,
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        ]
+        try:
+            response = self.client.models.generate_content(
+                model=self.conversion_model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=DocumentElements.response_json_schema(),
+                ),
+            )
+        except google_genai_errors.ClientError as e:
+            # Same 429-as-ResourceExhausted normalization as
+            # convert_content_with_retry: some 429s surface as ClientError
+            # rather than the dedicated ResourceExhausted type.
+            if e.code == HTTPStatus.TOO_MANY_REQUESTS:
+                logger.warning("Rate limit hit (429) during element conversion. Retrying...")
+                raise google_exceptions.ResourceExhausted("Rate limit exceeded (429)") from e
+            raise
+        elements = self.parse_elements_response(response.text or "")
+        return self._resolve_image_indexes(elements, index_to_hash)

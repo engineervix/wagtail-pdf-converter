@@ -1,0 +1,17 @@
+{% load wagtailcore_tags %}
+<table class="pdf-page-table">
+    {% if value.header %}
+        <thead>
+            <tr>
+                {% for cell in value.header %}<th>{{ cell }}</th>{% endfor %}
+            </tr>
+        </thead>
+    {% endif %}
+    <tbody>
+        {% for row in value.rows %}
+            <tr>
+                {% for cell in row %}<td>{{ cell }}</td>{% endfor %}
+            </tr>
+        {% endfor %}
+    </tbody>
+</table>

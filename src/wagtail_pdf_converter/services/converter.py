@@ -1,3 +1,4 @@
+import difflib
 import logging
 import re
 import time
@@ -16,6 +17,7 @@ from django.utils import timezone
 from wagtail_pdf_converter.conf import settings as conf_settings
 
 from .backends import get_ai_backend
+from .base import PDFConversionError
 from .image_processing import ImageProcessor
 
 
@@ -31,6 +33,72 @@ class DocumentLoggerAdapter(logging.LoggerAdapter):
 
 
 logger = DocumentLoggerAdapter(logging.getLogger(__name__), {"document_id": None})
+
+
+def validate_pdf(pdf_bytes: bytes) -> int:
+    """
+    Open ``pdf_bytes`` with fitz and reject inputs the AI backend could never
+    convert (not a PDF, password-protected, zero pages), before the expensive
+    part of the pipeline runs. Returns the page count on success.
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise PDFConversionError("This file could not be opened as a PDF.") from e
+
+    if doc.needs_pass:
+        raise PDFConversionError("This PDF is password-protected and cannot be converted.")
+    if doc.page_count == 0:
+        raise PDFConversionError("This PDF has no pages.")
+    return doc.page_count
+
+
+# How many elements near a chunk seam to check for duplicates.
+# `_remove_duplicate_content` below already uses the same 20-element window
+# for the markdown pipeline. Reuse that number instead of picking a new one.
+SEAM_DEDUP_WINDOW = 20
+
+
+def dedup_chunk_boundary(accumulated: "list[Any]", new: "list[Any]", window: int = SEAM_DEDUP_WINDOW) -> "list[Any]":
+    """
+    Remove elements from ``new`` that duplicate content near the end of
+    ``accumulated``.
+
+    Chunks share one overlap page, so the same content can appear in both.
+    The AI does not always segment that page the same way each time. A
+    duplicate can then land a few elements away from the seam, not only at
+    ``accumulated[-1]``/``new[0]``.
+
+    This function checks ``window`` elements at the end of ``accumulated`` and
+    the start of ``new``. A run of two or more matching elements anywhere in
+    that window counts as a duplicate. A single matching element only counts
+    as a duplicate at the exact seam. A single match away from the seam is
+    more likely a real repeated line, for example a cross-reference, so the
+    function keeps it.
+
+    The match must be exact. This function does not catch a duplicate that
+    the AI transcribed with a small error. Returns the elements to append
+    from ``new``.
+    """
+    if not accumulated or not new:
+        return list(new)
+
+    accum_window = accumulated[-window:]
+    new_window = new[:window]
+    accum_keys = [e.model_dump_json() for e in accum_window]
+    new_keys = [e.model_dump_json() for e in new_window]
+
+    matcher = difflib.SequenceMatcher(None, accum_keys, new_keys)
+    duplicate_positions: set[int] = set()
+    for block in matcher.get_matching_blocks():
+        if block.size == 0:
+            continue
+        at_seam = block.a == len(accum_window) - 1 and block.b == 0
+        if block.size >= 2 or at_seam:
+            duplicate_positions.update(range(block.b, block.b + block.size))
+
+    kept = [e for i, e in enumerate(new_window) if i not in duplicate_positions]
+    return kept + new[len(new_window) :]
 
 
 class HybridPDFConverter:
@@ -387,10 +455,7 @@ class HybridPDFConverter:
         metrics: dict[str, Any] = {}
         start_time = time.time()
 
-        try:
-            page_count = fitz.open(stream=pdf_bytes, filetype="pdf").page_count
-        except Exception:
-            page_count = 0
+        page_count = validate_pdf(pdf_bytes)
 
         metrics.update(
             {
@@ -467,3 +532,65 @@ class HybridPDFConverter:
         )
 
         return markdown_content, metrics
+
+    def convert_pdf_to_elements(
+        self,
+        pdf_bytes: bytes,
+        collection_name: str,
+        document_id: int | None = None,
+        force_chunking: bool = False,
+        pages_per_chunk: int = 15,
+    ) -> "tuple[list[Any], dict[str, Any]]":
+        """
+        Orchestrate PDF -> typed element stream, mirroring convert_pdf_to_markdown.
+
+        Extracts and uploads images (producing the image report the backend uses
+        to reference stored Images by hash), then converts the PDF into typed
+        elements via the AI backend's schema-constrained structured output.
+        Falls back to a single paragraph element if the backend returns nothing.
+        """
+        from ..elements import ParagraphElement
+
+        logger = DocumentLoggerAdapter(logging.getLogger(__name__), {"document_id": document_id})
+
+        metrics: dict[str, Any] = {}
+        start_time = time.time()
+
+        page_count = validate_pdf(pdf_bytes)
+
+        metrics.update({"pdf_size": humanize.naturalsize(len(pdf_bytes)), "total_pages": page_count})
+
+        # Extract images so the backend can reference them by content hash.
+        image_report, images_processed = self.image_processor.extract_and_upload_images(
+            pdf_bytes, collection_name, self.ai_client
+        )
+        metrics["images_processed"] = images_processed
+
+        chunk_threshold = conf_settings.CHUNK_PAGE_THRESHOLD
+        elements: list[Any] = []
+
+        if force_chunking or page_count > chunk_threshold:
+            metrics["processing_method"] = f"Chunked ({pages_per_chunk} pages/chunk)"
+            chunks = self.split_pdf_into_chunks(pdf_bytes, pages_per_chunk, overlap_pages=1)
+            for i, chunk_bytes in enumerate(chunks, 1):
+                try:
+                    chunk_elements = self.ai_client.convert_pdf_to_elements(chunk_bytes, image_report=image_report)
+                    # Drop elements duplicated from the overlap page shared with
+                    # the previous chunk before appending.
+                    elements.extend(dedup_chunk_boundary(elements, chunk_elements))
+                except Exception as e:
+                    logger.error("Failed to convert chunk %d to elements: %s", i, e)
+        else:
+            metrics["processing_method"] = "Single Pass"
+            elements = self.ai_client.convert_pdf_to_elements(pdf_bytes, image_report=image_report)
+
+        # Never produce an empty stream — fall back to a single paragraph.
+        if not elements:
+            logger.warning("Element conversion produced no elements; using fallback paragraph.")
+            elements = [ParagraphElement(type="paragraph", text="[No content extracted from PDF]")]
+
+        metrics["total_processing_time"] = f"{time.time() - start_time:.2f} seconds"
+        metrics["element_count"] = len(elements)
+        metrics["converted_at"] = timezone.now().isoformat()
+
+        return elements, metrics

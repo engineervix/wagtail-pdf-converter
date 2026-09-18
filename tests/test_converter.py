@@ -1,11 +1,15 @@
+import json
+
 from unittest import mock
 
 import factory
 
 from django.test import SimpleTestCase, override_settings
+from google.api_core import exceptions as google_exceptions
 from google.genai import errors as google_genai_errors
 from tenacity import RetryError, stop_after_attempt, wait_none
 
+from tests.conftest import make_valid_pdf_bytes
 from wagtail_pdf_converter import services
 from wagtail_pdf_converter.services import backends, image_processing
 
@@ -144,6 +148,20 @@ class TestImageHandling(SimpleTestCase):
         report_text = self.ai_client._format_image_report([])
         self.assertEqual(report_text, "No images were found in this document.")
 
+    def test_format_image_report_skips_entries_with_no_url(self):
+        """An image that failed to upload has no url. The Markdown prompt must
+        not print a literal "URL: None" for it, so it is left out here (the
+        page-creation path uses a separate formatter that does not need a
+        url, see _format_image_report_for_elements)."""
+        image_report_list = [
+            {"page": 1, "description": "Desc 1", "url": "/url/1"},
+            {"page": 2, "description": "Failed upload", "url": None},
+        ]
+        report_text = self.ai_client._format_image_report(image_report_list)
+        self.assertIn("- Page 1: Desc 1", report_text)
+        self.assertNotIn("Failed upload", report_text)
+        self.assertNotIn("None", report_text)
+
 
 class TestPDFChunking(SimpleTestCase):
     @override_settings(
@@ -209,6 +227,7 @@ class TestPDFChunking(SimpleTestCase):
         # Mock document for both converter and image processing
         mock_doc = mock.MagicMock()
         mock_doc.page_count = 20
+        mock_doc.needs_pass = False
         mock_doc.__len__.return_value = 20
         mock_doc.__iter__ = mock.Mock(return_value=iter([]))
 
@@ -255,6 +274,7 @@ class TestPDFChunking(SimpleTestCase):
         """Test that when a chunk conversion fails, error message is inserted and processing continues."""
         mock_doc = mock.MagicMock()
         mock_doc.page_count = 30
+        mock_doc.needs_pass = False
         mock_doc.__len__.return_value = 30
         mock_doc.__iter__ = mock.Mock(return_value=iter([]))
 
@@ -350,20 +370,23 @@ class TestPDFConverter(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # Update the retry policy on the AIClient method
-        cls._retry_obj = (
-            backends.gemini.GeminiBackend.convert_content_with_retry.retry  # type: ignore[attr-defined]
-        )
-        cls._old_wait = cls._retry_obj.wait
-        cls._old_stop = cls._retry_obj.stop
-        cls._retry_obj.wait = wait_none()
-        cls._retry_obj.stop = stop_after_attempt(1)
+        # Update the retry policy on the AIClient methods that carry one, so
+        # tests exhaust retries instantly instead of waiting for real backoff.
+        cls._retry_objs = [
+            backends.gemini.GeminiBackend.convert_content_with_retry.retry,  # type: ignore[attr-defined]
+            backends.gemini.GeminiBackend.convert_pdf_to_elements.retry,  # type: ignore[attr-defined]
+        ]
+        cls._old_policies = [(r.wait, r.stop) for r in cls._retry_objs]
+        for retry_obj in cls._retry_objs:
+            retry_obj.wait = wait_none()
+            retry_obj.stop = stop_after_attempt(1)
 
     @classmethod
     def tearDownClass(cls):
-        # Restore original retry policy
-        cls._retry_obj.wait = cls._old_wait
-        cls._retry_obj.stop = cls._old_stop
+        # Restore original retry policies
+        for retry_obj, (old_wait, old_stop) in zip(cls._retry_objs, cls._old_policies, strict=True):
+            retry_obj.wait = old_wait
+            retry_obj.stop = old_stop
         super().tearDownClass()
 
     @override_settings(
@@ -410,7 +433,7 @@ class TestPDFConverter(SimpleTestCase):
         mock_client.return_value.models.generate_content = mock_generate_content
 
         converter = services.HybridPDFConverter()
-        pdf_bytes = b"test pdf content"
+        pdf_bytes = make_valid_pdf_bytes()
         markdown_content, metrics = converter.convert_pdf_to_markdown(pdf_bytes, "test-collection")
 
         self.assertEqual(markdown_content, "## Test Markdown")
@@ -441,7 +464,7 @@ class TestPDFConverter(SimpleTestCase):
         mock_client.return_value.models.generate_content = mock_generate_content
 
         converter = services.HybridPDFConverter()
-        pdf_bytes = b"test pdf content"
+        pdf_bytes = make_valid_pdf_bytes()
 
         with self.assertRaises(RetryError):
             converter.convert_pdf_to_markdown(pdf_bytes, "test-collection")
@@ -474,7 +497,7 @@ class TestPDFConverter(SimpleTestCase):
         mock_client.return_value.models.generate_content = mock_generate_content
 
         converter = services.HybridPDFConverter()
-        pdf_bytes = b"test pdf content"
+        pdf_bytes = make_valid_pdf_bytes()
 
         with self.assertRaises(RetryError):
             converter.convert_pdf_to_markdown(pdf_bytes, "test-collection")
@@ -520,6 +543,123 @@ class TestPDFConverter(SimpleTestCase):
         # Verify it attempted to call the API
         # (with our test setup of stop_after_attempt(1), it should be called once)
         self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_server_error_triggers_retry(self, mock_client):
+        """convert_pdf_to_elements must retry transient errors, same as the
+        markdown path's convert_content_with_retry — it didn't before."""
+        server_error = google_genai_errors.ServerError(
+            503,
+            {"error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}},
+            None,
+        )
+        mock_generate_content = mock.Mock(side_effect=server_error)
+        mock_client.return_value.models.generate_content = mock_generate_content
+
+        converter = services.HybridPDFConverter()
+
+        with self.assertRaises(RetryError) as context:
+            converter.ai_client.convert_pdf_to_elements(b"test pdf content")
+
+        self.assertIsInstance(context.exception.last_attempt.exception(), google_genai_errors.ServerError)
+        # stop_after_attempt(1) in setUpClass -> exactly one call.
+        self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_429_client_error_is_normalized_and_retried(self, mock_client):
+        """A 429 surfacing as ClientError must be converted to ResourceExhausted
+        so tenacity's retry_if_exception_type actually catches it."""
+        rate_limit_error = google_genai_errors.ClientError(
+            429,
+            {"error": {"code": 429, "message": "Too many requests", "status": "RESOURCE_EXHAUSTED"}},
+            None,
+        )
+        mock_generate_content = mock.Mock(side_effect=rate_limit_error)
+        mock_client.return_value.models.generate_content = mock_generate_content
+
+        converter = services.HybridPDFConverter()
+
+        with self.assertRaises(RetryError) as context:
+            converter.ai_client.convert_pdf_to_elements(b"test pdf content")
+
+        self.assertIsInstance(context.exception.last_attempt.exception(), google_exceptions.ResourceExhausted)
+        self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_non_retryable_client_error_is_not_retried(self, mock_client):
+        """A genuine 4xx (bad request) must not be retried or masked — it
+        should propagate immediately, not wrapped in RetryError."""
+        bad_request_error = google_genai_errors.ClientError(
+            400,
+            {"error": {"code": 400, "message": "Bad request", "status": "INVALID_ARGUMENT"}},
+            None,
+        )
+        mock_generate_content = mock.Mock(side_effect=bad_request_error)
+        mock_client.return_value.models.generate_content = mock_generate_content
+
+        converter = services.HybridPDFConverter()
+
+        with self.assertRaises(google_genai_errors.ClientError):
+            converter.ai_client.convert_pdf_to_elements(b"test pdf content")
+
+        self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_translates_image_index_back_to_hash(self, mock_client):
+        """The model is asked to reference an image by a short index, not its
+        real 40-character hash. A model can mistype a long hash when copying
+        it back. The index must be resolved to the real hash before the
+        element reaches the page-creation loader."""
+        mock_response = mock.Mock()
+        mock_response.text = json.dumps({"elements": [{"type": "image", "image_hash": "1", "alt": "A chart"}]})
+        mock_client.return_value.models.generate_content.return_value = mock_response
+
+        converter = services.HybridPDFConverter()
+        image_report = [{"page": 1, "description": "A chart", "image_hash": "a" * 40, "url": "/media/x.png"}]
+
+        elements = converter.ai_client.convert_pdf_to_elements(b"test pdf content", image_report=image_report)
+
+        self.assertEqual(elements[0].image_hash, "a" * 40)
 
     @override_settings(
         WAGTAIL_PDF_CONVERTER={
