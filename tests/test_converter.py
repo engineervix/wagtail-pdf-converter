@@ -146,6 +146,20 @@ class TestImageHandling(SimpleTestCase):
         report_text = self.ai_client._format_image_report([])
         self.assertEqual(report_text, "No images were found in this document.")
 
+    def test_format_image_report_skips_entries_with_no_url(self):
+        """An image that failed to upload has no url. The Markdown prompt must
+        not print a literal "URL: None" for it, so it is left out here (the
+        page-creation path uses a separate formatter that does not need a
+        url, see _format_image_report_for_elements)."""
+        image_report_list = [
+            {"page": 1, "description": "Desc 1", "url": "/url/1"},
+            {"page": 2, "description": "Failed upload", "url": None},
+        ]
+        report_text = self.ai_client._format_image_report(image_report_list)
+        self.assertIn("- Page 1: Desc 1", report_text)
+        self.assertNotIn("Failed upload", report_text)
+        self.assertNotIn("None", report_text)
+
 
 class TestPDFChunking(SimpleTestCase):
     @override_settings(

@@ -1,3 +1,5 @@
+import hashlib
+
 from io import BytesIO
 from unittest import mock
 
@@ -339,6 +341,66 @@ class TestImageExtraction(SimpleTestCase):
             self.assertEqual(len(report), 1)
             self.assertEqual(count, 1)
 
+    @mock.patch(image_processing.__name__ + ".fitz")
+    @mock.patch(image_processing.__name__ + ".add_image_to_wagtail_collection")
+    def test_extract_images_count_excludes_failed_uploads(self, mock_add_image, mock_fitz):
+        """The report can hold a failed upload (no url) so the AI can still
+        reference it, but the processed count must not call it a success."""
+        mock_doc = mock.MagicMock()
+        mock_page = mock.Mock()
+        mock_page.number = 0
+        mock_page.get_images.return_value = [(123, 0, 0, 0, 0, 0, 0)]
+        mock_doc.__iter__.return_value = [mock_page]
+        mock_fitz.open.return_value = mock_doc
+        mock_ai_client = mock.Mock()
+
+        with (
+            mock.patch.object(self.processor, "_detect_and_merge_split_images") as mock_detect,
+            mock.patch.object(self.processor, "_is_image_useful", return_value=True),
+            mock.patch.object(self.processor, "process_image_batch") as mock_process_batch,
+        ):
+            mock_detect.return_value = {
+                123: {
+                    "bytes": b"fake",
+                    "format": "png",
+                    "width": 200,
+                    "height": 200,
+                    "is_combined": False,
+                }
+            }
+            mock_process_batch.return_value = [
+                {"page": 1, "image_name": "page_1_img_0.png", "description": "Uploaded fine", "url": "/media/a.png"},
+                {"page": 1, "image_name": "page_1_img_1.png", "description": "Failed to upload", "url": None},
+            ]
+
+            report, count = self.processor.extract_and_upload_images(b"fake_pdf", "test-collection", mock_ai_client)
+
+            self.assertEqual(len(report), 2)
+            self.assertEqual(count, 1)
+
+
+class TestConvertToPng(SimpleTestCase):
+    """Willow (Wagtail's image backend) does not recognise every format
+    Pillow can decode. _convert_to_png gives a failed upload a second try in
+    a format Willow does support."""
+
+    processor = ImageProcessor()
+
+    def test_decodes_jpeg2000_to_png(self):
+        source = Image.new("RGB", (16, 16), color=(120, 40, 200))
+        buf = BytesIO()
+        source.save(buf, format="JPEG2000")
+
+        result = self.processor._convert_to_png(buf.getvalue())
+
+        assert result is not None
+        decoded = Image.open(BytesIO(result))
+        self.assertEqual(decoded.format, "PNG")
+        self.assertEqual(decoded.size, (16, 16))
+
+    def test_returns_none_for_bytes_pillow_cannot_decode(self):
+        self.assertIsNone(self.processor._convert_to_png(b"not a real image"))
+
 
 class TestImageBatchProcessing(SimpleTestCase):
     """Test batch processing coordination."""
@@ -433,8 +495,12 @@ class TestImageBatchProcessing(SimpleTestCase):
 
     @mock.patch(image_processing.__name__ + ".add_image_to_wagtail_collection")
     def test_process_image_batch_upload_error_handling(self, mock_add_image):
-        """Test graceful handling when image upload fails."""
-        mock_add_image.side_effect = Exception("Upload failed")
+        """A failed upload must still be reported, not dropped. The AI can
+        still reference it, and the page-creation fallback can turn it into a
+        paragraph. Retrying with a converted PNG (see below) also fails here,
+        because the mock rejects every call, so this covers the last-resort
+        path."""
+        mock_add_image.side_effect = Exception("Some unrecoverable error")
         image_batch = [
             {
                 "bytes": self.test_image_bytes,
@@ -448,7 +514,68 @@ class TestImageBatchProcessing(SimpleTestCase):
 
         results = self.processor.process_image_batch(image_batch, "test-collection", mock_ai_client)
 
-        self.assertEqual(len(results), 0)
+        self.assertEqual(mock_add_image.call_count, 2)  # original attempt + retry
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0]["url"])
+        self.assertEqual(results[0]["description"], "A test image")
+        self.assertEqual(results[0]["page"], 1)
+        self.assertEqual(
+            results[0]["image_hash"],
+            hashlib.sha1(self.test_image_bytes, usedforsecurity=False).hexdigest(),
+        )
+
+    @mock.patch(image_processing.__name__ + ".add_image_to_wagtail_collection")
+    def test_process_image_batch_retries_with_converted_png(self, mock_add_image):
+        """Willow (Wagtail's image backend) does not recognise every format
+        Pillow can decode, for example JPEG2000 ("Cannot load jpx images").
+        A failed upload gets one retry with the image converted to PNG."""
+        mock_add_image.side_effect = [Exception("Cannot load jpx images"), "/media/converted.png"]
+        image_batch = [
+            {
+                "bytes": self.test_image_bytes,
+                "format": "jp2",
+                "page_num": 1,
+                "img_index": 0,
+            }
+        ]
+        mock_ai_client = mock.Mock()
+        mock_ai_client.describe_images_batch.return_value = ["A test image"]
+
+        results = self.processor.process_image_batch(image_batch, "test-collection", mock_ai_client)
+
+        self.assertEqual(mock_add_image.call_count, 2)
+        retry_call = mock_add_image.call_args_list[1]
+        self.assertTrue(retry_call.kwargs["image_name"].endswith(".png"))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["url"], "/media/converted.png")
+        converted_bytes = self.processor._convert_to_png(self.test_image_bytes)
+        assert converted_bytes is not None
+        self.assertEqual(
+            results[0]["image_hash"],
+            hashlib.sha1(converted_bytes, usedforsecurity=False).hexdigest(),
+        )
+
+    @mock.patch(image_processing.__name__ + ".add_image_to_wagtail_collection")
+    def test_process_image_batch_skips_retry_when_pillow_cannot_decode(self, mock_add_image):
+        """No point retrying with a conversion Pillow itself cannot make."""
+        mock_add_image.side_effect = Exception("Cannot load jpx images")
+        image_batch = [
+            {
+                "bytes": b"not a real image",
+                "format": "jp2",
+                "page_num": 1,
+                "img_index": 0,
+            }
+        ]
+        mock_ai_client = mock.Mock()
+        mock_ai_client.describe_images_batch.return_value = ["A test image"]
+
+        results = self.processor.process_image_batch(image_batch, "test-collection", mock_ai_client)
+
+        mock_add_image.assert_called_once()  # no retry attempted
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0]["url"])
 
 
 class TestImageProcessorConfiguration(SimpleTestCase):

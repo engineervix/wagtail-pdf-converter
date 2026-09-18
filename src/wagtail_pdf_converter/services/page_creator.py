@@ -68,7 +68,8 @@ def create_page_from_elements(
                 "Could not resolve image hash '%s'; routing to paragraph fallback.",
                 value.get("image_hash"),
             )
-            block_name, value = fallback_from_value(value.get("alt", ""))
+            note = f"This image could not be shown. Check the source PDF. {value.get('alt', '')}".strip()
+            block_name, value = fallback_from_value(note)
         elif block_name not in allowed_block_names:
             logger.warning(
                 "Block type '%s' is not registered on %s.body; routing to paragraph fallback.",

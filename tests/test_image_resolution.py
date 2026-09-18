@@ -60,9 +60,12 @@ class TestImageHashResolution:
             parent=root,
             page_model=PDFPage,
         )
-        # Falls back to a paragraph carrying the alt text so content survives.
+        # Falls back to a paragraph carrying the alt text so content survives,
+        # with a note that tells the editor to check the source PDF (the image
+        # itself did not make it into the page).
         assert page.body[0].block_type == "paragraph"
         assert "ghost" in str(page.body[0].value)
+        assert "Check the source PDF" in str(page.body[0].value)
 
     def test_mixed_stream_with_image(self):
         image_hash = self._make_image()

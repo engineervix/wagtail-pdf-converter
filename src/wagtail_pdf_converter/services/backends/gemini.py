@@ -177,12 +177,17 @@ class GeminiBackend(AIPDFBackend):
             return f"Image from page {page_num}"
 
     def _format_image_report(self, image_report: list[dict[str, Any]]) -> str:
-        """Format the image report as a readable string for the prompt."""
-        if not image_report:
+        """Format the image report as a readable string for the prompt.
+
+        Skips an entry with no url. That means the image failed to upload, so
+        there is no URL to put in the Markdown output.
+        """
+        uploaded = [img for img in image_report if img.get("url")]
+        if not uploaded:
             return "No images were found in this document."
 
         report_lines = ["EXTRACTED IMAGES:"]
-        for img_info in image_report:
+        for img_info in uploaded:
             report_lines.append(f"- Page {img_info['page']}: {img_info['description']}")
             report_lines.append(f"  URL: {img_info['url']}")
             report_lines.append("")

@@ -9,7 +9,6 @@ All notable changes to this project will be documented here.
 - Docs and test settings referenced `django_tasks.backends.database`, removed in django-tasks 0.12. Corrected to `django_tasks_db`.
 - `django-tasks-db` is now an optional `db-backend` extra rather than a hard dependency, since it conflicts with the `django-tasks` version older supported Wagtail releases pin.
 - Getting-started docs told readers to run `db_worker --queue-name pdf_conversion`, which binds to the default `ImmediateBackend` instead of the DB-backed queue. Corrected to `db_worker --backend pdf_conversion`.
-- Chunk-boundary dedup for page creation only matched duplicates that landed exactly at the seam. It now checks a small window around the seam, because the AI can segment the shared overlap page differently between chunks.
 
 ### Features
 
@@ -19,7 +18,8 @@ All notable changes to this project will be documented here.
 
 - New opt-in capability to turn a converted PDF into a real Wagtail Page with a StreamField body and the full editor workflow, alongside the existing Markdown-to-HTML output.
 - The AI emits schema-constrained typed elements (heading, paragraph, image, quote, code, table, list); a pluggable registry maps them to blocks, routing anything unrecognised to a paragraph so no content is silently dropped.
-- Images are resolved to already-stored Wagtail Images by content hash.
+- Documents over the page-chunking threshold are split into overlapping chunks and converted in sequence. Duplicate content from the overlap is detected and removed near the chunk seam.
+- Images are resolved to already-stored Wagtail Images by content hash. An image that fails to upload gets one retry as a converted PNG. If that also fails, it becomes a paragraph noting the source PDF, so nothing is silently dropped.
 - Programmatic API: `convert_pdf_to_page()` / `create_page_from_elements()`. Admin: an opt-in **Create page** action on documents, with a confirmation step.
 - Enabled via `ENABLE_PAGE_CREATION`, `PAGE_CREATION_MODEL`, and `PAGE_CREATION_PARENT_ID` settings. See the "Creating pages from PDFs" guide.
 
