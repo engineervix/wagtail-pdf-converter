@@ -92,6 +92,3 @@ class PDFStreamBlock(blocks.StreamBlock):
     code = CodeBlock()
     table = TableBlock()
     list = ListBlock()
-
-    class Meta:
-        block_counts = None
