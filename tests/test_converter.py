@@ -1,3 +1,5 @@
+import json
+
 from unittest import mock
 
 import factory
@@ -631,6 +633,33 @@ class TestPDFConverter(SimpleTestCase):
             converter.ai_client.convert_pdf_to_elements(b"test pdf content")
 
         self.assertEqual(mock_generate_content.call_count, 1)
+
+    @override_settings(
+        WAGTAIL_PDF_CONVERTER={
+            "AI_BACKENDS": {
+                "default": {
+                    "CLASS": "wagtail_pdf_converter.services.backends.gemini.GeminiBackend",
+                    "CONFIG": {"API_KEY": "test-key"},
+                }
+            }
+        }
+    )
+    @mock.patch("google.genai.Client")
+    def test_element_conversion_translates_image_index_back_to_hash(self, mock_client):
+        """The model is asked to reference an image by a short index, not its
+        real 40-character hash. A model can mistype a long hash when copying
+        it back. The index must be resolved to the real hash before the
+        element reaches the page-creation loader."""
+        mock_response = mock.Mock()
+        mock_response.text = json.dumps({"elements": [{"type": "image", "image_hash": "1", "alt": "A chart"}]})
+        mock_client.return_value.models.generate_content.return_value = mock_response
+
+        converter = services.HybridPDFConverter()
+        image_report = [{"page": 1, "description": "A chart", "image_hash": "a" * 40, "url": "/media/x.png"}]
+
+        elements = converter.ai_client.convert_pdf_to_elements(b"test pdf content", image_report=image_report)
+
+        self.assertEqual(elements[0].image_hash, "a" * 40)
 
     @override_settings(
         WAGTAIL_PDF_CONVERTER={

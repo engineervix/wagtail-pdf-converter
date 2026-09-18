@@ -200,18 +200,59 @@ class GeminiBackend(AIPDFBackend):
         """
         return conf_settings.PROMPTS["PDF_CONVERSION_TEMPLATE"].format(image_report=image_report)
 
-    def _format_image_report_for_elements(self, image_report: list[dict[str, Any]]) -> str:
-        """Format the image report for element conversion, exposing the content hash."""
+    def _format_image_report_for_elements(self, image_report: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
+        """
+        Format the image report for element conversion and build the index map.
+
+        A 40-character SHA-1 hash is hard for the model to copy back
+        exactly, and the risk grows with how many hashes are in one prompt.
+        The model is given a short, sequential index for each image instead,
+        and asked to reference images by that. Returns the prompt text and a
+        map from each index string to its real content hash. Pass that map to
+        _resolve_image_indexes once the model has responded, to translate its
+        answer back to the real hash.
+        """
         if not image_report:
-            return "No images were found in this document."
+            return "No images were found in this document.", {}
 
-        report_lines = ["EXTRACTED IMAGES (reference images by their HASH):"]
-        for img_info in image_report:
+        report_lines = ["EXTRACTED IMAGES (reference each image by its INDEX number):"]
+        index_to_hash: dict[str, str] = {}
+        for position, img_info in enumerate(image_report, start=1):
+            index = str(position)
             report_lines.append(f"- Page {img_info['page']}: {img_info['description']}")
-            report_lines.append(f"  HASH: {img_info.get('image_hash', '')}")
+            report_lines.append(f"  INDEX: {index}")
             report_lines.append("")
+            index_to_hash[index] = img_info.get("image_hash", "")
 
-        return "\n".join(report_lines)
+        return "\n".join(report_lines), index_to_hash
+
+    def _resolve_image_indexes(self, elements: "list[Any]", index_to_hash: dict[str, str]) -> "list[Any]":
+        """
+        Replace an image element's index reference with its real content hash.
+
+        The model was asked to reference images by index (see
+        _format_image_report_for_elements). An index it got wrong, or a real
+        hash it wrote anyway, is left untouched. Neither will resolve to a
+        stored Image. The existing paragraph fallback in
+        create_page_from_elements already covers that case.
+
+        Matches on a plain "type" and "image_hash" attribute, not
+        ImageElement specifically. A project can register its own model
+        under the "image" type (see register_element_type in elements.py).
+        Builds a new list rather than mutating elements in place, since a
+        custom registered model is allowed to be immutable.
+        """
+        resolved: list[Any] = []
+        for element in elements:
+            image_hash = getattr(element, "image_hash", None)
+            if (
+                getattr(element, "type", None) == "image"
+                and isinstance(image_hash, str)
+                and image_hash in index_to_hash
+            ):
+                element = element.model_copy(update={"image_hash": index_to_hash[image_hash]})
+            resolved.append(element)
+        return resolved
 
     @retry(
         wait=wait_exponential(multiplier=2, min=5, max=120),
@@ -394,8 +435,11 @@ class GeminiBackend(AIPDFBackend):
         Args:
             pdf_bytes: The source PDF.
             image_report: Extracted-image report (from the image pipeline). When
-                provided, image hashes are exposed to the model so it can emit
-                ``image`` elements that reference stored Wagtail Images.
+                provided, each image gets a short index in the prompt (see
+                _format_image_report_for_elements) so the model can emit
+                ``image`` elements that reference stored Wagtail Images. The
+                index is resolved back to the real content hash before the
+                elements are returned.
         """
         from ...elements import DocumentElements, custom_element_prompt_lines
 
@@ -410,7 +454,7 @@ class GeminiBackend(AIPDFBackend):
                 + "\n".join(custom_lines)
             )
 
-        image_section = self._format_image_report_for_elements(image_report or [])
+        image_section, index_to_hash = self._format_image_report_for_elements(image_report or [])
         prompt = f"{base_prompt}\n\n{image_section}"
         contents: list[Any] = [
             prompt,
@@ -433,4 +477,5 @@ class GeminiBackend(AIPDFBackend):
                 logger.warning("Rate limit hit (429) during element conversion. Retrying...")
                 raise google_exceptions.ResourceExhausted("Rate limit exceeded (429)") from e
             raise
-        return self.parse_elements_response(response.text or "")
+        elements = self.parse_elements_response(response.text or "")
+        return self._resolve_image_indexes(elements, index_to_hash)
