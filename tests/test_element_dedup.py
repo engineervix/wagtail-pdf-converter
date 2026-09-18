@@ -54,3 +54,31 @@ class TestDedupChunkBoundary:
         accumulated = [P("a"), ListElement(type="list", ordered=False, items=["1", "2"])]
         new = [ListElement(type="list", ordered=False, items=["1", "2"]), P("b")]
         assert dedup_chunk_boundary(accumulated, new) == [P("b")]
+
+    def test_position_drifted_duplicate_is_removed(self):
+        # The AI segments the shared overlap page differently in each chunk
+        # call. "shared1"/"shared2" repeat, but chunk 2 has a new element
+        # ahead of them, so they do not land at new[0].
+        accumulated = [P("intro"), P("shared1"), P("shared2")]
+        new = [P("newfirst"), P("shared1"), P("shared2"), P("continues")]
+        result = dedup_chunk_boundary(accumulated, new)
+        assert result == [P("newfirst"), P("continues")]
+
+    def test_isolated_duplicate_run_of_one_away_from_seam_is_preserved(self):
+        # A single matching element away from the true seam is too easily a
+        # legitimate recurring line, for example a boilerplate cross-reference.
+        # Only a run of 2+ elements counts as a real seam duplicate when it is
+        # not anchored at accumulated[-1]/new[0].
+        accumulated = [P("a"), P("b"), P("c")]
+        new = [P("newfirst"), P("b"), P("continues")]
+        result = dedup_chunk_boundary(accumulated, new)
+        assert result == [P("newfirst"), P("b"), P("continues")]
+
+    def test_window_bounds_how_far_back_matches_are_considered(self):
+        # "run1"/"run2" recur several elements before accumulated's tail, too
+        # far back to plausibly be the overlap page. A small window leaves
+        # them alone, even though they form a matching run of 2.
+        accumulated = [P("run1"), P("run2"), P("mid1"), P("mid2"), P("mid3")]
+        new = [P("run1"), P("run2"), P("tail")]
+        result = dedup_chunk_boundary(accumulated, new, window=3)
+        assert result == [P("run1"), P("run2"), P("tail")]

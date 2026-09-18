@@ -1,3 +1,4 @@
+import difflib
 import logging
 import re
 import time
@@ -52,29 +53,52 @@ def validate_pdf(pdf_bytes: bytes) -> int:
     return doc.page_count
 
 
-def dedup_chunk_boundary(accumulated: "list[Any]", new: "list[Any]") -> "list[Any]":
+# How many elements near a chunk seam to check for duplicates.
+# `_remove_duplicate_content` below already uses the same 20-element window
+# for the markdown pipeline. Reuse that number instead of picking a new one.
+SEAM_DEDUP_WINDOW = 20
+
+
+def dedup_chunk_boundary(accumulated: "list[Any]", new: "list[Any]", window: int = SEAM_DEDUP_WINDOW) -> "list[Any]":
     """
-    Remove overlap between the end of ``accumulated`` and the start of ``new``.
+    Remove elements from ``new`` that duplicate content near the end of
+    ``accumulated``.
 
-    Chunks are converted with page overlap, so content from the shared page can
-    appear as elements at the end of one chunk and the start of the next. This
-    finds the largest trailing run of ``accumulated`` that exactly matches a
-    leading run of ``new`` (same type and content) and drops it from ``new``.
+    Chunks share one overlap page, so the same content can appear in both.
+    The AI does not always segment that page the same way each time. A
+    duplicate can then land a few elements away from the seam, not only at
+    ``accumulated[-1]``/``new[0]``.
 
-    Only the immediate seam is considered: duplicates elsewhere are legitimate
-    content and are preserved. Returns the portion of ``new`` to append.
+    This function checks ``window`` elements at the end of ``accumulated`` and
+    the start of ``new``. A run of two or more matching elements anywhere in
+    that window counts as a duplicate. A single matching element only counts
+    as a duplicate at the exact seam. A single match away from the seam is
+    more likely a real repeated line, for example a cross-reference, so the
+    function keeps it.
+
+    The match must be exact. This function does not catch a duplicate that
+    the AI transcribed with a small error. Returns the elements to append
+    from ``new``.
     """
     if not accumulated or not new:
         return list(new)
 
-    # Largest k such that accumulated[-k:] == new[:k]. k can be at most the
-    # shorter of the two lengths.
-    max_k = min(len(accumulated), len(new))
-    overlap = 0
-    for k in range(1, max_k + 1):
-        if accumulated[-k:] == new[:k]:
-            overlap = k
-    return list(new[overlap:])
+    accum_window = accumulated[-window:]
+    new_window = new[:window]
+    accum_keys = [e.model_dump_json() for e in accum_window]
+    new_keys = [e.model_dump_json() for e in new_window]
+
+    matcher = difflib.SequenceMatcher(None, accum_keys, new_keys)
+    duplicate_positions: set[int] = set()
+    for block in matcher.get_matching_blocks():
+        if block.size == 0:
+            continue
+        at_seam = block.a == len(accum_window) - 1 and block.b == 0
+        if block.size >= 2 or at_seam:
+            duplicate_positions.update(range(block.b, block.b + block.size))
+
+    kept = [e for i, e in enumerate(new_window) if i not in duplicate_positions]
+    return kept + new[len(new_window) :]
 
 
 class HybridPDFConverter:

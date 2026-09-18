@@ -9,6 +9,7 @@ All notable changes to this project will be documented here.
 - Docs and test settings referenced `django_tasks.backends.database`, removed in django-tasks 0.12. Corrected to `django_tasks_db`.
 - `django-tasks-db` is now an optional `db-backend` extra rather than a hard dependency, since it conflicts with the `django-tasks` version older supported Wagtail releases pin.
 - Getting-started docs told readers to run `db_worker --queue-name pdf_conversion`, which binds to the default `ImmediateBackend` instead of the DB-backed queue. Corrected to `db_worker --backend pdf_conversion`.
+- Chunk-boundary dedup for page creation only matched duplicates that landed exactly at the seam. It now checks a small window around the seam, because the AI can segment the shared overlap page differently between chunks.
 
 ### Features
 

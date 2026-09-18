@@ -61,3 +61,30 @@ class TestChunkedElementDedup:
 
         texts = [e.text for e in elements]
         assert texts == ["ref", "end-of-chunk-1", "start-of-chunk-2", "ref"]
+
+    def test_chunked_conversion_dedups_drifted_duplicate(self, valid_pdf_bytes):
+        # "shared1"/"shared2" repeat from the overlap page, but chunk 2 has a
+        # new element ahead of them, so the duplicate is not at new[0].
+        backend = MagicMock()
+        backend.convert_pdf_to_elements.side_effect = [
+            [P("page1"), P("shared1"), P("shared2")],
+            [P("new-in-chunk2"), P("shared1"), P("shared2"), P("page2")],
+        ]
+
+        with patch(
+            "wagtail_pdf_converter.services.converter.get_ai_backend",
+            return_value=backend,
+        ):
+            converter = HybridPDFConverter()
+            converter.image_processor = MagicMock()
+            converter.image_processor.extract_and_upload_images.return_value = ([], 0)
+            converter.split_pdf_into_chunks = MagicMock(return_value=[b"chunk1", b"chunk2"])
+
+            elements, _ = converter.convert_pdf_to_elements(
+                pdf_bytes=valid_pdf_bytes,
+                collection_name="Extracted Images",
+                force_chunking=True,
+            )
+
+        texts = [e.text for e in elements]
+        assert texts == ["page1", "shared1", "shared2", "new-in-chunk2", "page2"]
